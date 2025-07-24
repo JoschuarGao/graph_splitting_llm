@@ -1,0 +1,38 @@
+{
+  "all_1": {
+    "motorway": 1.0,
+    "trunk": 1.0,
+    "primary": 1.0,
+    "secondary": 1.0,
+    "tertiary": 1.0,
+    "residential": 1.0,
+    "living_street": 1.0,
+    "service": 1.0,
+    "unclassified": 1.0,
+    "road": 1.0
+  },
+  "motorway1_rankup_1": {
+    "motorway": 1.0,
+    "trunk": 2.0,
+    "primary": 3.0,
+    "secondary": 4.0,
+    "tertiary": 5.0,
+    "residential": 6.0,
+    "living_street": 7.0,
+    "service": 8.0,
+    "unclassified": 9.0,
+    "road": 10.0
+  },
+  "motorway1_rankdown_1": {
+    "motorway": 1.0,
+    "trunk": 0.8,
+    "primary": 0.6,
+    "secondary": 0.5,
+    "tertiary": 0.4,
+    "residential": 0.3,
+    "living_street": 0.2,
+    "service": 0.15,
+    "unclassified": 0.1,
+    "road": 0.05
+  }
+}

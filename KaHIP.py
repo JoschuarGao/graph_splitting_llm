@@ -58,6 +58,17 @@ def write_metis_weighted(G, path):
         f.write(f"{len(node_list)} {len(written_edges)} 1\n")
         for line in edge_lines:
             f.write(line +"\n")
+def generate_csv_path(base_dir="~/Desktop/masterarbeit/result"):
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    csv_dir = os.path.expanduser(base_dir)
+    os.makedirs(csv_dir, exist_ok=True)
+
+    existing_files = [
+        f for f in os.listdir(csv_dir)
+        if f.startswith("results_" + today_str)
+    ]
+    run_index = len(existing_files) + 1
+    return os.path.join(csv_dir, f"results_{today_str}_run_{run_index:04d}.csv")
 
 def save_result_to_csv(city, version, k, cut_count, cut_weight, total_weight, csv_path, lane_weight_version=None, alpha=1.0, beta=1.0, gamma=0.1):
     file_exists = os.path.isfile(csv_path)
@@ -424,17 +435,22 @@ if __name__ == "__main__":
     parser.add_argument("--place", type=str, required=True)
     parser.add_argument("--k", type=int, default=3)
     parser.add_argument("--dist", type=int, default=5000)
-    parser.add_argument("--csv_path", type=str, default=os.path.expanduser("~/Desktop/masterarbeit/result/results.csv"))
     parser.add_argument("--cache_dir", type=str, default="./cached_maps")
     parser.add_argument("--road_type_version", type=str, required=True)
+    parser.add_argument("--road_type_path", type=str, default="road_type_weights.json")
     parser.add_argument("--lane_weight_version", type=str, required=True)
+    parser.add_argument("--lane_weight_path", type=str, default="lane_weight_version.json")
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--gamma", type=float, default=0.1)
+    parser.add_argument("--csv_path", type=str, default=os.path.expanduser("~/Desktop/masterarbeit/result/results.csv"))
+
 
     args = parser.parse_args()
-    road_type_weights = load_weights(args.road_type_version)
-    lane_weight_config = load_lane_weights(args.lane_weight_version)
+    road_type_weights = load_weights(args.road_type_version, args.road_type_path)
+    lane_weight_config = load_lane_weights(args.lane_weight_version, args.lane_weight_path)
+    csv_path = args.csv_path  # 使用外部传入的路径，不要重新生成
+
 
     process_place(
         place=args.place,
@@ -443,7 +459,7 @@ if __name__ == "__main__":
         k=args.k,
         dist=args.dist,
         cache_dir=args.cache_dir,
-        csv_path=args.csv_path,
+        csv_path=csv_path,
         lane_weight_config=lane_weight_config,
         lane_weight_version=args.lane_weight_version,
         alpha=args.alpha,

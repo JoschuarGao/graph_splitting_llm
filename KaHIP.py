@@ -1,5 +1,6 @@
 import networkx as nx
 import os
+import pyproj
 import ast
 import osmnx as ox
 import matplotlib.pyplot as plt
@@ -16,6 +17,8 @@ import itertools
 from collections import defaultdict
 from shapely.geometry import LineString
 from datetime import datetime
+from matplotlib import cm
+from pyproj import Transformer
 
 
 def load_weights(version="all_1", path="road_type_weights.json"):
@@ -91,8 +94,21 @@ def save_result_to_csv(city, version, k, cut_count, cut_weight, total_weight, cs
 
 
 def plot_edge_weights(G, save_path=None, title="Edge Weight Visualization"):
+
+    project = Transformer.from_crs("epshg:4326", "epsg:3857", always_xy=True)
+
     
-    pos = {node: (data["x"], data["y"]) for node, data in G.nodes(data=True) if "x" in data and "y" in data}
+    lon_lat_pos = {
+        node: (data["x"], data["y"])
+        for node, data in G.nodes(data=True)
+        if "x" in data and "y" in data
+    }  
+    pos = {
+        node: project.transform(x, y)
+        for node, (x, y) in lon_lat_pos.items()
+    }
+    
+    # pos = {node: (data["x"], data["y"]) for node, data in G.nodes(data=True) if "x" in data and "y" in data}
     weights = [data.get("weight", 1.0) for _, _, data in G.edges(data=True)]
 
     if not weights or not pos:
@@ -100,10 +116,22 @@ def plot_edge_weights(G, save_path=None, title="Edge Weight Visualization"):
         return
 
     norm = mcolors.Normalize(vmin=min(weights), vmax=max(weights))
-    cmap = cm.viridis
+    cmap = cm.get_cmap("tab20")
+    
     edge_colors = [cmap(norm(weight)) for weight in weights]
 
     fig, ax = plt.subplots(figsize=(10, 10))
+    ax.set_facecolor("black")
+    xticks = ax.get_xticks()
+    yticks = ax.get_yticks()
+    ax.set_xticks(xticks)
+    ax.set_yticks(yticks)
+    ax.set_xticklabels([f"{val/1000:.1f} km" for val in xticks], fontsize=10, color="white")
+    ax.set_yticklabels([f"{val/1000:.1f} km" for val in yticks], fontsize=10, color="white")
+    ax.tick_params(axis='both', colors='white')
+    ax.set_xlabel("Easting (km)", color="white")
+    ax.set_ylabel("Northing (km)", color="white")
+
     nx.draw_networkx_edges(
         G, pos,
         edge_color=edge_colors,
@@ -233,7 +261,7 @@ def process_place(place,road_type_weights,version, k=3,dist=5000, cache_dir='./c
     pos = {node: (data["x"], data["y"]) for node, data in G.nodes(data=True) if "x" in data and "y" in data}
     weights = [data.get("weight", 1.0) for _, _, data in G.edges(data=True)]
     norm = mcolors.Normalize(vmin=min(weights), vmax=max(weights))
-    cmap = cm.viridis
+    cmap = cm.get_cmap("tab20c")
     edge_colors = [cmap(norm(weight)) for weight in weights]
 
     fig, ax = plt.subplots(figsize=(10, 10))
@@ -368,10 +396,12 @@ def process_place(place,road_type_weights,version, k=3,dist=5000, cache_dir='./c
         sub_pos = {n:(G.nodes[n]["x"], G.nodes[n]["y"]) for n in subgraph.nodes()}
 
         fig_sub, ax_sub = plt.subplots(figsize=(10,10))
+        ax_sub.set_facecolor("black")
+
         weights_sub = [data.get("weight", 1.0) for _,_, data in subgraph.edges(data=True)]
         if weights_sub :
             norm_sub = mcolors.Normalize(vmin=min(weights),vmax=max(weights))
-            cmap_sub = cm.viridis
+            cmap_sub = cm.get_cmap("tab20c")
             edge_colors = [cmap_sub(norm_sub(w)) for w in weights_sub]
             nx.draw_networkx_edges(subgraph, sub_pos, edge_color=edge_colors, width=2,ax=ax_sub)
         nx.draw_networkx_nodes(subgraph, sub_pos, node_size=1, ax=ax_sub)

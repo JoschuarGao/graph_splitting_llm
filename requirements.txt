@@ -1,0 +1,25 @@
+# ==== Core graph & geo ====
+osmnx>=2.0,<3
+geopandas>=0.14
+shapely>=2.0
+folium>=0.15
+matplotlib>=3.7
+numpy>=1.23
+pandas>=1.5
+
+# ==== GUI embedding ====
+tkinterweb>=4.4.4          # Try to embed HTML in a Tk window
+pywebview>=4.4             # In-app browser window (JS/Leaflet support); fallback when tkinterweb fails
+
+# ==== Platform-specific helpers ====
+# On Linux, pywebview requires PyGObject; WebKit2GTK must be installed via the system package manager
+PyGObject>=3.46; platform_system=="Linux"
+
+# On macOS, pywebview requires PyObjC (Cocoa/WebKit bridges)
+pyobjc>=10.3; platform_system=="Darwin"
+pyobjc-framework-Cocoa>=10.3; platform_system=="Darwin"
+pyobjc-framework-WebKit>=10.3; platform_system=="Darwin"
+
+# ==== Optional (enable if needed) ====
+# rtree                 # Optional: spatial index for GeoPandas (faster); requires system libspatialindex
+# kaminpar              # Optional: KaMinPar Python bindings; if pip installation fails, build from source or manage separately

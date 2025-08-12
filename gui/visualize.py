@@ -15,10 +15,10 @@ def make_map(nodes_gdf: gpd.GeoDataFrame,
              k: int) -> str:
     """
     两层地图：
-      - 内部边（part_u == part_v）按 partition 上色
-      - 切割边（part_u != part_v 或 is_cut==True）红色虚线
+      - 内部边(part_u == part_v)按 partition 上色
+      - 切割边(part_u != part_v 或 is_cut==True)红色虚线
     返回 HTML 文件路径。
-    需要 edges_gdf 至少包含：geometry, part_u, part_v；可选 is_cut, highway, length。
+    需要 edges_gdf 至少包含:geometry, part_u, part_v,可选 is_cut, highway, length。
     """
     # 基础校验
     for col in ("geometry", "part_u", "part_v"):

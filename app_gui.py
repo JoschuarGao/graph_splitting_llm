@@ -1,20 +1,30 @@
-import os
+import os,sys,webbrowser
+from pathlib import Path
+ROOT = os.path.dirname(os.path.abspath(__file__))
+if ROOT not in sys.path:
+    sys.path.append(ROOT)
+
 import threading
-import webbrowser
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 from core.osm_loader import load_graph
 from core.kahip_runner import run_kahip
 from core.results_reader import read_kahip_json, parse_from_json
-from core.visualize import make_map, compute_cut_stats
-from core.partition_fallback import spectral_partition, gdfs_from_assignment
+from gui.visualize import make_map, compute_cut_stats
 from core.config import OUTPUT_DIR
+
+try:
+    from tkinterweb import HtmlFrame   # pip install tkinterweb
+    HAS_HTML = True
+except Exception:
+    HtmlFrame = None
+    HAS_HTML = False
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("OSM 分区可视化（KaHIP + explore）")
+        self.title("OSM 分区可视化(KaHIP + explore)")
         self.geometry("900x560")
 
         # 变量
@@ -27,15 +37,17 @@ class App(tk.Tk):
         self.var_gamma = tk.DoubleVar(value=1.0)
 
         self.var_road_json = tk.StringVar(value="")
-        self.var_lane_ver  = tk.StringVar(value="")
-        self.var_use_kahip = tk.BooleanVar(value=True)  # 勾选 → 调 KaHIP；不勾选 → 后备分区
+        self.var_road_ver  = tk.StringVar(value="all_1")   # 路型权重“版本”
+        self.var_lane_ver  = tk.StringVar(value="v1")      # 给车道权重版本一个有效默认值
+
 
         self._build_form()
-        self._build_log()
+        self._build_view()
 
         self._running = False
 
     def _build_form(self):
+        
         frm = ttk.Frame(self, padding=12)
         frm.pack(fill="x")
 
@@ -64,6 +76,10 @@ class App(tk.Tk):
         add_slider(row2, "beta",  self.var_beta)
         add_slider(row2, "gamma", self.var_gamma)
 
+        row3a = ttk.Frame(frm); row3a.pack(fill="x", pady=6)
+        ttk.Label(row3a, text="road_type_version").pack(side="left")
+        ttk.Entry(row3a, textvariable=self.var_road_ver, width=20).pack(side="left", padx=6)
+
         # 行3：权重 json / 车道版本（按你的 KaHIP.py 需要）
         row3 = ttk.Frame(frm); row3.pack(fill="x", pady=6)
         ttk.Label(row3, text="road_type_weights.json").pack(side="left")
@@ -71,32 +87,73 @@ class App(tk.Tk):
         ttk.Button(row3, text="选择...", command=self._choose_json).pack(side="left", padx=6)
 
         row3b = ttk.Frame(frm); row3b.pack(fill="x", pady=2)
-        ttk.Label(row3b, text="lane_weight_version（可选）").pack(side="left")
+        ttk.Label(row3b, text="lane_weight_version").pack(side="left")
         ttk.Entry(row3b, textvariable=self.var_lane_ver, width=20).pack(side="left", padx=6)
 
-        # 行4：选择是否调用 KaHIP（否则用后备分区）
-        row4 = ttk.Frame(frm); row4.pack(fill="x", pady=6)
-        ttk.Checkbutton(row4, text="使用 KaHIP.py 计算真实分区", variable=self.var_use_kahip).pack(side="left")
+        row4 = ttk.Frame(frm); row4.pack(fill="x", pady=10)
+        self.btn_run = ttk.Button(row4, text="运行 / 更新", command=self._on_run_clicked)
+        self.btn_run.pack(side="left", padx=(12,0))
 
         # 行5：按钮
         row5 = ttk.Frame(frm); row5.pack(fill="x", pady=10)
-        self.btn_run = ttk.Button(row5, text="运行 / 更新", command=self._on_run_clicked)
-        self.btn_run.pack(side="left")
 
         ttk.Button(row5, text="打开输出文件夹", command=lambda: self._open_dir(OUTPUT_DIR)).pack(side="left", padx=8)
 
-    def _build_log(self):
-        frm = ttk.Frame(self, padding=(12,0))
-        frm.pack(fill="both", expand=True)
-        ttk.Label(frm, text="运行日志 / 指标").pack(anchor="w")
-        self.txt = tk.Text(frm, height=14)
+    def _build_view(self):
+        # 一个 Notebook：页签1显示地图，页签2显示日志
+        self.nb = ttk.Notebook(self)
+        self.nb.pack(fill="both", expand=True, padx=12, pady=(0,12))
+
+        # 地图页
+        self.tab_map = ttk.Frame(self.nb)
+        self.nb.add(self.tab_map, text="Map")
+        if HAS_HTML:
+            self.map_frame = HtmlFrame(self.tab_map)
+            self.map_frame.pack(fill="both", expand=True)
+            self._log("地图面板已就绪。运行后会在此显示。")
+        else:
+            self.map_frame = None
+            ttk.Label(
+                self.tab_map,
+                text="tkinterweb not installed,无法在窗口内嵌地图。\n已自动回退为在默认浏览器中打开。",
+                foreground="#a00"
+            ).pack(pady=12)
+
+        # 日志页
+        tab_log = ttk.Frame(self.nb)
+        self.nb.add(tab_log, text="运行日志 / 指标")
+        self.txt = tk.Text(tab_log, height=14)
         self.txt.pack(fill="both", expand=True)
+
+        # 初始提示
         self._log("准备就绪。调整参数后点击『运行 / 更新』。")
 
+    def _show_map(self, html_path: str):
+        """把生成的 HTML 地图嵌到 GUI；若不支持则用系统浏览器打开。"""
+        abs_path = os.path.abspath(html_path)
+        exists = os.path.exists(abs_path)
+        self._log(f"[内嵌地图] 准备加载: {abs_path}  (exists={exists})")
+
+        if HAS_HTML and self.map_frame is not None and exists:
+            try:
+                # 关键：优先用 load_file 读取本地 HTML
+                self.map_frame.load_file(abs_path)
+                self._log("[内嵌地图] load_file OK")
+                if hasattr(self, "nb") and hasattr(self, "tab_map"):
+                    self.nb.select(self.tab_map)
+                    return
+            except Exception as e:
+                self._log(f"[WARN] load_file 失败: {e}")
+
+        # 回退：用系统浏览器打开
+        webbrowser.open_new_tab(abs_path)
+        self._log(f"[外部浏览器] {abs_path}")
+
+
+
     def _log(self, msg: str):
-        self.txt.insert("end", msg + "\n")
-        self.txt.see("end")
-        self.update_idletasks()
+        self.after(0, lambda: (self.txt.insert("end", msg + "\n"), self.txt.see("end")))
+
 
     def _choose_json(self):
         path = filedialog.askopenfilename(
@@ -121,6 +178,11 @@ class App(tk.Tk):
         if self._running: return
         self._running = True
         self.btn_run.config(state="disabled")
+
+        if hasattr(self, "nb"):
+            self.nb.select(self.nb.tabs()[-1])  # 选中最后一个页签（日志）
+            self._log("开始计算…（首次加载路网可能需要几十秒，建议先把 dist 调小测试）")
+
         t = threading.Thread(target=self._run_pipeline, daemon=True)
         t.start()
 
@@ -134,43 +196,57 @@ class App(tk.Tk):
             gamma   = float(self.var_gamma.get())
             road_js = self.var_road_json.get().strip() or None
             lane_v  = self.var_lane_ver.get().strip() or None
-            use_kahip = bool(self.var_use_kahip.get())
+
+            if road_js and not os.path.isfile(road_js):
+                self._log(f"[WARN] road_type_weights.json 不存在：{road_js}")
+                self.after(0, lambda: messagebox.showwarning("文件不存在", f"{road_js}"))
+                road_js = None
 
             self._log(f"参数：place='{place}', dist={dist}, k={k}, α/β/γ=({alpha:.2f},{beta:.2f},{gamma:.2f})")
-            # 1) 加载路网
-            from core.osm_loader import load_graph
+
             G = load_graph(place, dist=dist)
             self._log(f"- 图规模：nodes={G.number_of_nodes()}, edges={G.number_of_edges()}")
 
-            if use_kahip:
-                # 2) 调 KaHIP.py
-                self._log("- 调用 KaHIP.py 计算真实分区...")
-                params = dict(place=place, k=k, alpha=alpha, beta=beta, gamma=gamma,
-                              road_type_weights=road_js, lane_weight_version=lane_v)
-                json_path = run_kahip(params)
-                self._log(f"- KaHIP 输出 JSON：{json_path}")
+            # 仅 KaHIP 分支
+            self._log("- 调用 KaHIP.py 计算真实分区...")
+            json_path = run_kahip(
+                place=place, k=k, dist=dist,
+                alpha=alpha, beta=beta, gamma=gamma,
+                road_type_version=(self.var_road_ver.get().strip() or "all_1"),
+                road_type_path=(road_js or "road_type_weights.json"),
+                lane_weight_version=(lane_v or "v1"),
+)
 
-                # 3) 读取 KaHIP 输出
-                data = read_kahip_json(json_path)
-                nodes_gdf, edges_gdf = parse_from_json(G, data)
-            else:
-                # 2*) 后备分区方案（演示用）
-                self._log("- 使用后备分区（谱聚类/最近中心）...")
-                assignment = spectral_partition(G, k)
-                nodes_gdf, edges_gdf = gdfs_from_assignment(G, assignment)
+            self._log(f"- KaHIP 输出 JSON：{json_path}")
 
-            # 4) 统计 + 绘图
-            from core.visualize import make_map, compute_cut_stats
+            data = read_kahip_json(json_path)
+            nodes_gdf, edges_gdf = parse_from_json(G, data)
+
             stats = compute_cut_stats(edges_gdf)
+            # 确保键名与 compute_cut_stats 返回一致
             self._log(f"- cut_edge_count={stats['cut_edge_count']}, edges={stats['edges']}, cut_ratio={stats['cut_ratio']:.4f}")
 
+
             html = make_map(nodes_gdf, edges_gdf, place, k)
-            self._log(f"- 生成地图：{html}")
-            webbrowser.open(f"file://{os.path.abspath(html)}", new=2)
+            self._log(f"- graph generated: {html}")
+            self._show_map(html)
+
 
         except Exception as e:
-            messagebox.showerror("运行失败", str(e))
-            self._log(f"[ERROR] {e}")
+            import traceback
+            msg = f"{e}"
+            self._log("[ERROR] " + msg)
+            # 也把完整堆栈写到日志里，方便排查
+            self._log(traceback.format_exc())
+
+            # 关键：把 msg 绑定到 lambda 的默认参数，避免 e 丢失
+            self.after(0, lambda m=msg: messagebox.showerror("fail running", m))
+
         finally:
             self._running = False
-            self.btn_run.config(state="normal")
+            self.after(0, lambda: self.btn_run.config(state="normal"))
+
+if __name__ == "__main__":
+    app = App()
+    app.mainloop()
+ 

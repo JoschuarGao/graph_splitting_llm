@@ -7,8 +7,11 @@ OUTPUT_DIR = os.path.join(ROOT_DIR, "outputs")
 os.makedirs(CACHE_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# KaHIP.py 仍然建议绝对路径；但你也可以放到工程里并用 ROOT_DIR 拼
-KAHIP_PY_PATH = "/Users/joschuagao/Desktop/Masterarbeit/KaHIP.py"
+# 
+RESULT_BASE = os.environ.get("RESULT_BASE") or os.path.join(ROOT_DIR, "result")
+os.makedirs(RESULT_BASE, exist_ok=True)
+
+KAHIP_PY_PATH = os.environ.get("KAHIP_PY_PATH") or os.path.join(ROOT_DIR, "KaHIP.py")
 
 KAHIP_CLI_ARGS = {
     "place": "--place",

@@ -1,5 +1,4 @@
 import os,sys,webbrowser
-from pathlib import Path
 ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
     sys.path.append(ROOT)
@@ -91,7 +90,7 @@ class App(tk.Tk):
         ttk.Entry(row3b, textvariable=self.var_lane_ver, width=20).pack(side="left", padx=6)
 
         row4 = ttk.Frame(frm); row4.pack(fill="x", pady=10)
-        self.btn_run = ttk.Button(row4, text="运行 / 更新", command=self._on_run_clicked)
+        self.btn_run = ttk.Button(row4, text="run /update", command=self._on_run_clicked)
         self.btn_run.pack(side="left", padx=(12,0))
 
         # 行5：按钮
@@ -108,7 +107,7 @@ class App(tk.Tk):
         self.tab_map = ttk.Frame(self.nb)
         self.nb.add(self.tab_map, text="Map")
         if HAS_HTML:
-            self.map_frame = HtmlFrame(self.tab_map)
+            self.map_frame = HtmlFrame(self.tab_map, messages_enabled=False)
             self.map_frame.pack(fill="both", expand=True)
             self._log("地图面板已就绪。运行后会在此显示。")
         else:
@@ -126,10 +125,10 @@ class App(tk.Tk):
         self.txt.pack(fill="both", expand=True)
 
         # 初始提示
-        self._log("准备就绪。调整参数后点击『运行 / 更新』。")
+        self._log("Ready, adjust parameter and print 'Run/Update'")
 
     def _show_map(self, html_path: str):
-        """把生成的 HTML 地图嵌到 GUI；若不支持则用系统浏览器打开。"""
+        """把生成的 HTML 地图嵌到 GUI,若不支持则用系统浏览器打开。"""
         abs_path = os.path.abspath(html_path)
         exists = os.path.exists(abs_path)
         self._log(f"[内嵌地图] 准备加载: {abs_path}  (exists={exists})")
@@ -147,6 +146,8 @@ class App(tk.Tk):
 
         # 回退：用系统浏览器打开
         webbrowser.open_new_tab(abs_path)
+        if hasattr(self, "nb") and hasattr(self, "tab_map"):
+            self.nb.select(self.tab_map)
         self._log(f"[外部浏览器] {abs_path}")
 
 
@@ -181,7 +182,7 @@ class App(tk.Tk):
 
         if hasattr(self, "nb"):
             self.nb.select(self.nb.tabs()[-1])  # 选中最后一个页签（日志）
-            self._log("开始计算…（首次加载路网可能需要几十秒，建议先把 dist 调小测试）")
+            self._log("开Calculating…(seconds needed for the fisrt loading, decrease dist to test)")
 
         t = threading.Thread(target=self._run_pipeline, daemon=True)
         t.start()
@@ -236,10 +237,10 @@ class App(tk.Tk):
             import traceback
             msg = f"{e}"
             self._log("[ERROR] " + msg)
-            # 也把完整堆栈写到日志里，方便排查
+            # 把完整堆栈写到日志里，方便排查
             self._log(traceback.format_exc())
 
-            # 关键：把 msg 绑定到 lambda 的默认参数，避免 e 丢失
+            # 把 msg 绑定到 lambda 的默认参数，避免 e 丢失
             self.after(0, lambda m=msg: messagebox.showerror("fail running", m))
 
         finally:

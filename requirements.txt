@@ -6,6 +6,8 @@ folium>=0.15
 matplotlib>=3.7
 numpy>=1.23
 pandas>=1.5
+pyproj>=3.5
+fiona>=1.9
 
 # ==== GUI embedding ====
 tkinterweb>=4.4.4          # Try to embed HTML in a Tk window
@@ -15,10 +17,6 @@ pywebview>=4.4             # In-app browser window (JS/Leaflet support); fallbac
 # On Linux, pywebview requires PyGObject; WebKit2GTK must be installed via the system package manager
 PyGObject>=3.46; platform_system=="Linux"
 
-# On macOS, pywebview requires PyObjC (Cocoa/WebKit bridges)
-pyobjc>=10.3; platform_system=="Darwin"
-pyobjc-framework-Cocoa>=10.3; platform_system=="Darwin"
-pyobjc-framework-WebKit>=10.3; platform_system=="Darwin"
 
 # ==== Optional (enable if needed) ====
 # rtree                 # Optional: spatial index for GeoPandas (faster); requires system libspatialindex

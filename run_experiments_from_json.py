@@ -4,23 +4,23 @@ import os
 import sys
 from datetime import datetime
 
-#  使用当前 Python 解释器路径（兼容虚拟环境）
+# Use the current Python interpreter path (works with virtual environments)
 python_path = sys.executable
 
-#  当前日期字符串，用于结果命名
+# Current date string for naming result files
 today_str = datetime.now().strftime("%Y-%m-%d")
 
-#  统一结果 CSV 路径
+# Unified results CSV path
 csv_filename = f"results_{today_str}_full_run.csv"
 csv_path = os.path.expanduser(f"~/Desktop/masterarbeit/result/{csv_filename}")
 
-#  加载组合参数
+# Load parameter combinations from JSON file
 with open("parameter_combinations_part1.json", "r") as f:
     param_combos = json.load(f)
 
-#  开始批量运行
+# Start batch runs
 for idx, combo in enumerate(param_combos):
-    print(f"▶️ Running {idx + 1}/{len(param_combos)}: {combo['place']} k={combo['k']}")
+    print(f" Running {idx + 1}/{len(param_combos)}: {combo['place']} k={combo['k']}")
 
     cmd = [
         python_path, "KaHIP.py",
@@ -36,5 +36,5 @@ for idx, combo in enumerate(param_combos):
         "--csv_path", csv_path
     ]
 
-    # run KaHIP.py
+    # Run KaHIP.py with the current parameter set
     subprocess.run(cmd)

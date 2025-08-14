@@ -9,15 +9,7 @@ pandas>=1.5
 pyproj>=3.5
 fiona>=1.9
 
-# ==== GUI embedding ====
-tkinterweb>=4.4.4          # Try to embed HTML in a Tk window
-pywebview>=4.4             # In-app browser window (JS/Leaflet support); fallback when tkinterweb fails
+# ==== GUI (PyQt) ====
+PyQt5>=5.15
+PyQt5-WebEngine>=5.15
 
-# ==== Platform-specific helpers ====
-# On Linux, pywebview requires PyGObject; WebKit2GTK must be installed via the system package manager
-PyGObject>=3.46; platform_system=="Linux"
-
-
-# ==== Optional (enable if needed) ====
-# rtree                 # Optional: spatial index for GeoPandas (faster); requires system libspatialindex
-# kaminpar              # Optional: KaMinPar Python bindings; if pip installation fails, build from source or manage separately

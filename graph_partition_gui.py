@@ -7,22 +7,22 @@ from KaHIP import process_place, load_weights, load_lane_weights
 import os
 from datetime import datetime
 
-# 固定地图与划分版本
+# Fixed map and partition versions
 PLACE = "Karlsruhe"
 ROAD_TYPE_VERSION = "all_1"
 LANE_WEIGHT_VERSION = "all_1"
 ROAD_TYPE_PATH = "road_type_weights.json"
 LANE_WEIGHT_PATH = "lane_weight_version.json"
 
-# 加载权重配置
+# Load weight configuration
 road_type_weights = load_weights(ROAD_TYPE_VERSION, ROAD_TYPE_PATH)
 lane_weight_config = load_lane_weights(LANE_WEIGHT_VERSION, LANE_WEIGHT_PATH)
 
-# 图形显示用的 matplotlib 元素
+# Matplotlib figure elements for display
 fig, ax = plt.subplots(figsize=(8, 8))
 canvas = None
 
-# 当前参数值
+# Current parameter values
 params = {
     "k": 3,
     "alpha": 1.0,
@@ -30,18 +30,23 @@ params = {
     "gamma": 0.1
 }
 
-# 结果标签
+# Label to display results
 result_label = None
 
+
 def update_graph():
+    """
+    Update the graph visualization and statistics display.
+    This function calls the main partitioning function and refreshes the plot and metrics.
+    """
     ax.clear()
 
-    # 临时路径，仅显示不保存
+    # Temporary CSV path for results (used only for display, not for saving permanently)
     temp_csv = os.path.expanduser("~/Desktop/masterarbeit/result/temp_result.csv")
     if os.path.exists(temp_csv):
         os.remove(temp_csv)
 
-    # 调用主划分函数（KaHIP.py 中）
+    # Call the main partitioning function from KaHIP.py
     process_place(
         place=PLACE,
         road_type_weights=road_type_weights,
@@ -57,9 +62,10 @@ def update_graph():
         gamma=params["gamma"]
     )
 
+    # Redraw the Matplotlib figure
     fig.canvas.draw()
 
-    # 读取 CSV 展示指标
+    # Read the CSV file to display metrics
     if os.path.exists(temp_csv):
         with open(temp_csv, "r") as f:
             lines = f.readlines()
@@ -72,27 +78,37 @@ def update_graph():
                 result_text = f"Cut Edges: {cut_count}, Weight Sum: {cut_weight}, Total: {total_weight}, Ratio: {cut_ratio}"
                 result_label.config(text=result_text)
 
+
 def on_slider_change(name, val):
+    """
+    Handle slider value changes and update parameters accordingly.
+    """
     if name in ["k"]:
         params[name] = int(val)
     else:
         params[name] = float(val)
     update_graph()
 
+
 def main():
+    """
+    Create the main Tkinter window, embed the Matplotlib plot,
+    and add interactive sliders for adjusting partition parameters.
+    """
     global canvas, result_label
 
     root = tk.Tk()
     root.title("Graph Partition Interactive GUI")
 
-    # Matplotlib 图嵌入
+    # Embed Matplotlib figure into Tkinter window
     canvas = FigureCanvasTkAgg(fig, master=root)
     canvas.get_tk_widget().pack()
 
-    # 滑块区域
+    # Sliders frame
     control_frame = tk.Frame(root)
     control_frame.pack(pady=10)
 
+    # Slider configuration: min, max, resolution
     sliders = {
         "k": {"from": 2, "to": 8, "res": 1},
         "alpha": {"from": 0.1, "to": 3.0, "res": 0.1},
@@ -100,6 +116,7 @@ def main():
         "gamma": {"from": 0.01, "to": 1.0, "res": 0.01}
     }
 
+    # Create sliders dynamically
     for idx, (name, config) in enumerate(sliders.items()):
         label = tk.Label(control_frame, text=name)
         label.grid(row=idx, column=0, padx=10, sticky="e")
@@ -110,14 +127,15 @@ def main():
         slider.set(params[name])
         slider.grid(row=idx, column=1, padx=10)
 
-    # 显示结果指标
+    # Label to display computed metrics
     result_label = tk.Label(root, text="Cut Ratio: --", font=("Arial", 12), pady=10)
     result_label.pack()
 
-    # 初始图
+    # Initial graph update
     update_graph()
 
     root.mainloop()
+
 
 if __name__ == "__main__":
     main()

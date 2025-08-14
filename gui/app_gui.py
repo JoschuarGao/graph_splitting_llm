@@ -1,6 +1,7 @@
 import os, sys, webbrowser
 from pathlib import Path
 
+# Add project root to Python path
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -15,6 +16,7 @@ from core.results_reader import read_kahip_json, parse_from_json
 from gui.visualize import make_map, compute_cut_stats
 from core.config import OUTPUT_DIR
 
+# Try to import tkinterweb for embedded HTML map view
 try:
     from tkinterweb import HtmlFrame
     HAS_HTML = True
@@ -29,7 +31,7 @@ class App(tk.Tk):
         self.title("OSM Partition Viewer (KaHIP + Folium)")
         self.geometry("900x560")
 
-        # 参数变量
+        # Parameter variables
         self.var_place = tk.StringVar(value="Karlsruhe, Germany")
         self.var_dist  = tk.IntVar(value=5000)
         self.var_k     = tk.IntVar(value=4)
@@ -40,22 +42,25 @@ class App(tk.Tk):
         self.var_road_ver  = tk.StringVar(value="all_1")
         self.var_lane_ver  = tk.StringVar(value="v1")
 
-        # 缓存与防抖
+        # Cache for map results and debounce control
         self._map_cache = {}
         self._debounce_id = None
         self._running = False
 
+        # Build UI
         self._build_form()
         self._build_view()
 
+        # Initial log messages
         self._log(f"Python: {sys.executable}")
         self._log(f"tkinterweb: {'OK' if HAS_HTML else 'MISSING (will open in browser)'}")
 
     def _build_form(self):
+        """Build the top parameter input panel."""
         frm = ttk.Frame(self, padding=12)
         frm.pack(fill="x")
 
-        # Row 1: place / dist / k
+        # Row 1: Place / dist / k
         row1 = ttk.Frame(frm); row1.pack(fill="x", pady=6)
         ttk.Label(row1, text="Place").pack(side="left")
         ttk.Entry(row1, textvariable=self.var_place, width=42).pack(side="left", padx=6)
@@ -88,7 +93,7 @@ class App(tk.Tk):
         ttk.Label(row3a, text="road_type_version").pack(side="left")
         ttk.Entry(row3a, textvariable=self.var_road_ver, width=20).pack(side="left", padx=6)
 
-        # Row 3b: weights json + lane version
+        # Row 3b: road_type_weights.json + lane version
         row3 = ttk.Frame(frm); row3.pack(fill="x", pady=6)
         ttk.Label(row3, text="road_type_weights.json").pack(side="left")
         ttk.Entry(row3, textvariable=self.var_road_json, width=50).pack(side="left", padx=6)
@@ -103,14 +108,16 @@ class App(tk.Tk):
         self.btn_run = ttk.Button(row4, text="Run / Update", command=self._on_run_clicked)
         self.btn_run.pack(side="left", padx=(12, 0))
 
-        # Row 5: open output dir
+        # Row 5: Open output directory
         row5 = ttk.Frame(frm); row5.pack(fill="x", pady=10)
         ttk.Button(row5, text="Open output folder", command=lambda: self._open_dir(OUTPUT_DIR)).pack(side="left", padx=8)
 
     def _build_view(self):
+        """Build the notebook view with 'Map' and 'Run Log / Metrics' tabs."""
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
+        # Map tab
         self.tab_map = ttk.Frame(self.nb)
         self.nb.add(self.tab_map, text="Map")
         if HAS_HTML:
@@ -125,6 +132,7 @@ class App(tk.Tk):
                 foreground="#a00"
             ).pack(pady=12)
 
+        # Log tab
         tab_log = ttk.Frame(self.nb)
         self.nb.add(tab_log, text="Run Log / Metrics")
         self.txt = tk.Text(tab_log, height=14)
@@ -133,7 +141,7 @@ class App(tk.Tk):
         self._log("Ready. Adjust parameters to update map.")
 
     def _on_param_changed(self):
-        """防抖触发更新"""
+        """Debounce: schedule an update when parameters change."""
         if self._debounce_id:
             try:
                 self.after_cancel(self._debounce_id)
@@ -142,6 +150,7 @@ class App(tk.Tk):
         self._debounce_id = self.after(500, self._update_map_from_params)
 
     def _update_map_from_params(self):
+        """Update map if parameters have changed, using cache if available."""
         params_key = (
             self.var_place.get().strip(),
             int(self.var_dist.get()),
@@ -165,6 +174,7 @@ class App(tk.Tk):
             t.start()
 
     def _run_pipeline_and_cache(self, params_key):
+        """Run the partitioning pipeline and store the HTML result in cache."""
         try:
             html = self._run_pipeline_core()
             self._map_cache[params_key] = html
@@ -174,6 +184,7 @@ class App(tk.Tk):
             self.after(0, lambda: self.btn_run.config(state="normal"))
 
     def _run_pipeline_core(self):
+        """Core logic: load graph, run KaHIP, parse results, compute stats, generate map."""
         place = self.var_place.get().strip()
         dist  = int(self.var_dist.get())
         k     = int(self.var_k.get())
@@ -214,6 +225,7 @@ class App(tk.Tk):
         return html
 
     def _show_map(self, html_path: str):
+        """Display the HTML map either in embedded view or browser."""
         abs_path = os.path.abspath(html_path)
         exists = os.path.exists(abs_path)
         self._log(f"[Embed] Load: {abs_path}  (exists={exists})")
@@ -229,9 +241,11 @@ class App(tk.Tk):
         self._log(f"[Browser] {abs_path}")
 
     def _log(self, msg: str):
+        """Append a log message to the log tab."""
         self.after(0, lambda: (self.txt.insert("end", msg + "\n"), self.txt.see("end")))
 
     def _choose_json(self):
+        """Open file dialog to choose road_type_weights.json."""
         path = filedialog.askopenfilename(
             title="Choose road_type_weights.json",
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
@@ -240,6 +254,7 @@ class App(tk.Tk):
             self.var_road_json.set(path)
 
     def _open_dir(self, path: str):
+        """Open the specified directory in the system file browser."""
         try:
             import platform, subprocess
             if platform.system() == "Windows":
@@ -252,6 +267,7 @@ class App(tk.Tk):
             messagebox.showerror("Open folder failed", str(e))
 
     def _on_run_clicked(self):
+        """Handler for 'Run / Update' button click."""
         self._update_map_from_params()
 
 

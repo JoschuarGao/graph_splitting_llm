@@ -17,12 +17,14 @@ from pyproj import Transformer
 
 
 def load_weights(version="all_1", path="road_type_weights.json"):
+    """Load road type weights from JSON file."""
     with open(path, "r") as f:
         all_weights = json.load(f)
     return all_weights[version]
 
 
 def load_lane_weights(version=None, path="lane_weight_version.json"):
+    """Load lane weight configuration from JSON file."""
     if version and path and os.path.isfile(path):
         with open(path, "r") as f:
             all_weights = json.load(f)
@@ -31,6 +33,9 @@ def load_lane_weights(version=None, path="lane_weight_version.json"):
 
 
 def write_metis_weighted(G, path):
+    """
+    Write a weighted graph in METIS format for KaMinPar input.
+    """
     node_list = list(G.nodes())
     node_map = {node: idx+1 for idx, node in enumerate(node_list)}
     written_edges = set()
@@ -55,10 +60,14 @@ def write_metis_weighted(G, path):
     with open(path, "w") as f:
         f.write(f"{len(node_list)} {len(written_edges)} 1\n")
         for line in edge_lines:
-            f.write(line +"\n")
+            f.write(line + "\n")
+
 
 def generate_csv_path(base_dir=None):
-    base_dir = base_dir or os.environ.get("RESULT_BASE")or os.path.join(os.path.dirname(os.path.abspath(__file__)), "result")
+    """
+    Generate a unique CSV file path based on today's date and run index.
+    """
+    base_dir = base_dir or os.environ.get("RESULT_BASE") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "result")
     csv_dir = base_dir
     today_str = datetime.now().strftime("%Y-%m-%d")
     os.makedirs(csv_dir, exist_ok=True)
@@ -70,7 +79,11 @@ def generate_csv_path(base_dir=None):
     run_index = len(existing_files) + 1
     return os.path.join(csv_dir, f"results_{today_str}_run_{run_index:04d}.csv")
 
+
 def save_result_to_csv(city, version, k, cut_count, cut_weight, total_weight, csv_path, lane_weight_version=None, alpha=1.0, beta=1.0, gamma=0.1):
+    """
+    Append partition results to a CSV file, creating headers if file does not exist.
+    """
     file_exists = os.path.isfile(csv_path)
     with open(csv_path, mode="a", newline='') as f:
         writer = csv.writer(f)
@@ -89,36 +102,34 @@ def save_result_to_csv(city, version, k, cut_count, cut_weight, total_weight, cs
         ])
 
 
-
 def plot_edge_weights(G, save_path=None, title="Edge Weight Visualization"):
-
+    """
+    Visualize edge weights on the graph using a color map.
+    """
     transformer = Transformer.from_crs("epsg:4326", "epsg:3857", always_xy=True)
 
-    
     lon_lat_pos = {
         node: (data["x"], data["y"])
         for node, data in G.nodes(data=True)
         if "x" in data and "y" in data
-    }  
+    }
     pos = {
         node: transformer.transform(x, y)
         for node, (x, y) in lon_lat_pos.items()
     }
-    
-    # pos = {node: (data["x"], data["y"]) for node, data in G.nodes(data=True) if "x" in data and "y" in data}
-    weights = [data.get("weight", 1.0) for _, _, data in G.edges(data=True)]
 
+    weights = [data.get("weight", 1.0) for _, _, data in G.edges(data=True)]
     if not weights or not pos:
         print("Insufficient data for plotting edge weights.")
         return
 
     norm = mcolors.Normalize(vmin=min(weights), vmax=max(weights))
     cmap = cm.get_cmap("tab20")
-    
     edge_colors = [cmap(norm(weight)) for weight in weights]
 
     fig, ax = plt.subplots(figsize=(10, 10))
     ax.set_facecolor("black")
+
     xticks = ax.get_xticks()
     yticks = ax.get_yticks()
     ax.set_xticks(xticks)
@@ -154,95 +165,89 @@ def plot_edge_weights(G, save_path=None, title="Edge Weight Visualization"):
     else:
         plt.show()
 
-def process_place(place,road_type_weights,version, k=3,dist=5000, cache_dir='./cached_maps', csv_path="results.csv",
-                  lane_weight_config=None, lane_weight_version=None,alpha=1.0, beta=1.0, gamma=0.1):
 
-    
-    safe_name = place.replace(",","").replace(" ","_")
-    os.makedirs(cache_dir,exist_ok=True)
-    cache_path = os.path.join(cache_dir,f"{safe_name}.graphml")
+def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='./cached_maps', csv_path="results.csv",
+                  lane_weight_config=None, lane_weight_version=None, alpha=1.0, beta=1.0, gamma=0.1):
+    """
+    Main function for processing a place:
+    - Load or download road network
+    - Assign weights to edges
+    - Partition the graph using KaMinPar
+    - Visualize and save results
+    """
+    safe_name = place.replace(",", "").replace(" ", "_")
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_path = os.path.join(cache_dir, f"{safe_name}.graphml")
 
+    # Load cached graph or download from OSM
     if os.path.exists(cache_path):
         G_original = ox.load_graphml(cache_path)
     else:
         G_original = ox.graph_from_address(place, dist=dist, network_type="drive")
         ox.save_graphml(G_original, cache_path)
-    # if an exact place name inputed, then only the map of this region will be downloaded, otherwise, the map of the whole city will be download
+
+    # Convert to undirected and remove self-loops
     G_original = G_original.to_undirected()
     G = nx.Graph(G_original)
     G.remove_edges_from(nx.selfloop_edges(G))
 
-    # weights
+    # Assign edge weights
     for u, v, data in G.edges(data=True):
         highway = data.get("highway", "unclassified")
         if isinstance(highway, list):
             highway = highway[0]
-        base_weight = road_type_weights.get(highway, road_type_weights.get("default",1))
+        base_weight = road_type_weights.get(highway, road_type_weights.get("default", 1))
 
-        # get the number of lanes
-        lanes =  data.get("lanes")
+        # Get lane count
+        lanes = data.get("lanes")
         try:
             lane_count = int(lanes) if lanes else 1
         except:
             lane_count = 1
 
         if lane_weight_config:
-            lane_factor = lane_weight_config.get(str(lane_count),lane_weight_config.get("default",1.0))
+            lane_factor = lane_weight_config.get(str(lane_count), lane_weight_config.get("default", 1.0))
         else:
             lane_factor = 1
 
-        # get the lenth of the roads
-        length = data.get("length",1)
-        # set weight with softmax function
-        length_factor = max(0.1, 1/math.exp((length-500)/100)+1)
-       
-        #set the upperor lower limit of the weight to avoid the weight being too large or too small
-        # alpha, beta, gamma = 1.0, 1.0, 0.1
-        scaled_weight = math.log1p(length_factor)
-        total_weight = alpha*base_weight + beta*lane_factor + gamma*scaled_weight
-        data["weight"] = max(0.2, min(total_weight, 10))
-        
+        # Get road length
+        length = data.get("length", 1)
+        # Use a smoothed factor for length
+        length_factor = max(0.1, 1/math.exp((length-500)/100) + 1)
 
-    # METIS
+        # Scale weights with alpha, beta, gamma
+        scaled_weight = math.log1p(length_factor)
+        total_weight = alpha * base_weight + beta * lane_factor + gamma * scaled_weight
+        data["weight"] = max(0.2, min(total_weight, 10))
+
+    # Write graph to temporary METIS file
     tmp_graph_path = tempfile.NamedTemporaryFile(suffix=".metis", delete=False).name
     write_metis_weighted(G, tmp_graph_path)
 
-    # KaMinPar partition
-
+    # Partition the graph using KaMinPar
     instance = kaminpar.KaMinPar(num_threads=1, ctx=kaminpar.default_context())
     graph = kaminpar.load_graph(tmp_graph_path, kaminpar.GraphFileFormat.METIS, compress=False)
     partition = instance.compute_partition(graph, k=k, eps=0.1)
 
-    # color
-    cmap = plt.get_cmap("tab20")
-
-    # 构建映射
+    # Map node to partition
     node_list = list(G.nodes())
     node_to_partition = {node: partition[i] for i, node in enumerate(node_list)}
 
-    # get the cutted edges
-    # 统计总权重
+    # Collect cut edges
     total_weight = sum(d.get("weight", 1.0) for _, _, d in G.edges(data=True))
-    #cut_weight_total = sum(
-        #G.get_edge_data(u, v).get("weight", 1.0)
-        #for u, v in G.edges()
-        #if node_to_partition[u] != node_to_partition[v]
-    #)
     cut_edges = []
     cut_weight_total = 0.0
-    
-
-    #cut_edges_weights 
     for u, v in G.edges():
         pu, pv = node_to_partition[u], node_to_partition[v]
         if pu != pv:
             u_xy = (G.nodes[u]['x'], G.nodes[u]['y'])
             v_xy = (G.nodes[v]['x'], G.nodes[v]['y'])
             cut_edges.append((u_xy, v_xy, pu, pv))
-            cut_weight_total += G.get_edge_data(u,v).get("weight", 1.0)
+            cut_weight_total += G.get_edge_data(u, v).get("weight", 1.0)
 
     cut_ratio = cut_weight_total / total_weight if total_weight > 0 else 0
 
+    # Draw partition visualization
     pos = {node: (data["x"], data["y"]) for node, data in G.nodes(data=True) if "x" in data and "y" in data}
     weights = [data.get("weight", 1.0) for _, _, data in G.edges(data=True)]
     norm = mcolors.Normalize(vmin=min(weights), vmax=max(weights))
@@ -250,7 +255,6 @@ def process_place(place,road_type_weights,version, k=3,dist=5000, cache_dir='./c
     edge_colors = [cmap(norm(weight)) for weight in weights]
 
     fig, ax = plt.subplots(figsize=(10, 10))
-
     nx.draw_networkx_edges(G, pos, edge_color=edge_colors, edge_cmap=cmap,
                            edge_vmin=min(weights), edge_vmax=max(weights), width=0.5, ax=ax)
     nx.draw_networkx_nodes(G, pos, node_size=1, ax=ax)
@@ -268,22 +272,17 @@ def process_place(place,road_type_weights,version, k=3,dist=5000, cache_dir='./c
         transform=ax.transAxes, fontsize=14, ha='left', va='top', color="black",
         bbox=dict(facecolor='white', edgecolor='black', boxstyle='round,pad=0.3'))
 
-
-    
-    #cluster midpoint
+    # Draw dashed lines between partitions for cut edges
     midpoints_by_region_pair = defaultdict(list)
     for u_xy, v_xy, pu, pv in cut_edges:
         midpoint = ((u_xy[0] + v_xy[0]) / 2, (u_xy[1] + v_xy[1]) / 2)
         key = tuple(sorted((pu, pv)))
         midpoints_by_region_pair[key].append(midpoint)
 
-    
-
-    # 按区域对画连线
     for (p1, p2), points in midpoints_by_region_pair.items():
         if len(points) < 2:
             continue
-        points_sorted = sorted(points, key=lambda p: (p[0], p[1])) 
+        points_sorted = sorted(points, key=lambda p: (p[0], p[1]))
         line = LineString(points_sorted)
         color_idx = p1 * k + p2
         line_color = cmap((color_idx % 20) / 20)
@@ -291,80 +290,54 @@ def process_place(place,road_type_weights,version, k=3,dist=5000, cache_dir='./c
         ax.plot(x, y, color=line_color, linewidth=3, alpha=0.9, linestyle='--', label=f"{p1}-{p2}")
 
     plt.legend()
-    ax.set_title(f"Graph Partitioning of {place}", fontsize=14)
 
-
-    # current date
+    # Save main figure
     today_str = datetime.now().strftime("%Y-%m-%d")
-
     base_dir = os.path.abspath(os.path.expanduser(
         os.environ.get("RESULT_BASE") or
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "result")
     ))
-
-    city_dir = os.path.join(base_dir, safe_name)
-    version_dir = os.path.join(city_dir, version)
     date_dir = os.path.join(base_dir, safe_name, version, today_str)
     os.makedirs(date_dir, exist_ok=True)
-
-    # count the existed run file
-    existing_files = [
-        f for f in os.listdir(date_dir)
-        if f.startswith("run") and f.endswith(".png")
-    ]
-    run_index = len(existing_files) + 1
-
-    # filename
+    run_index = len([f for f in os.listdir(date_dir) if f.startswith("run") and f.endswith(".png")]) + 1
     filename = f"run{run_index}_k{k}_a{alpha}_b{beta}_g{gamma}.png"
     if lane_weight_version:
         filename = f"{lane_weight_version}_" + filename
-
-    # save the final path
     save_path = os.path.join(date_dir, filename)
-
-    # save the figure
     plt.savefig(save_path, dpi=300)
-    print(f"Figure saved to: {save_path}")
     plt.close(fig)
+    print(f"Figure saved to: {save_path}")
 
+    # Save sub-partition figures
     for pid in range(k):
         sub_nodes = [node for node in G.nodes() if node_to_partition.get(node) == pid]
         subgraph = G.subgraph(sub_nodes).copy()
-        sub_pos = {n:(G.nodes[n]["x"], G.nodes[n]["y"]) for n in subgraph.nodes()}
+        sub_pos = {n: (G.nodes[n]["x"], G.nodes[n]["y"]) for n in subgraph.nodes()}
 
-        fig_sub, ax_sub = plt.subplots(figsize=(10,10))
+        fig_sub, ax_sub = plt.subplots(figsize=(10, 10))
         ax_sub.set_facecolor("black")
-
-        weights_sub = [data.get("weight", 1.0) for _,_, data in subgraph.edges(data=True)]
-        if weights_sub :
-            norm_sub = mcolors.Normalize(vmin=min(weights),vmax=max(weights))
+        weights_sub = [data.get("weight", 1.0) for _, _, data in subgraph.edges(data=True)]
+        if weights_sub:
+            norm_sub = mcolors.Normalize(vmin=min(weights_sub), vmax=max(weights_sub))
             cmap_sub = cm.get_cmap("tab20c")
             edge_colors = [cmap_sub(norm_sub(w)) for w in weights_sub]
-            nx.draw_networkx_edges(subgraph, sub_pos, edge_color=edge_colors, width=2,ax=ax_sub)
+            nx.draw_networkx_edges(subgraph, sub_pos, edge_color=edge_colors, width=2, ax=ax_sub)
         nx.draw_networkx_nodes(subgraph, sub_pos, node_size=1, ax=ax_sub)
-        ax_sub.set_title(f"Partition{pid} for {place}", fontsize=14)
+        ax_sub.set_title(f"Partition {pid} for {place}", fontsize=14)
         ax_sub.set_axis_off()
 
         part_filename = f"partition_{pid}_k{k}_run{run_index}.png"
         part_save_path = os.path.join(date_dir, part_filename)
         plt.savefig(part_save_path, dpi=300)
         plt.close(fig_sub)
-        print(f"saved sub-partition figure:{part_save_path}")
+        print(f"Saved sub-partition figure: {part_save_path}")
 
-    print(f"Figure saved to:{save_path}")
-
-    os.remove(tmp_graph_path)
-    # record the result
+    # Save results to CSV
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-    save_result_to_csv(
-        place, version, k, len(cut_edges), cut_weight_total, total_weight,
-        csv_path, lane_weight_version,
-        alpha=alpha, beta=beta, gamma=gamma
-    )
+    save_result_to_csv(place, version, k, len(cut_edges), cut_weight_total, total_weight,
+                       csv_path, lane_weight_version, alpha=alpha, beta=beta, gamma=gamma)
 
-
-
-    # 保存每条边的分区信息（用于 GNN）
+    # Save edge partition info for GNN or further analysis
     edge_partition_info = []
     for u, v, data in G.edges(data=True):
         pu, pv = node_to_partition.get(u, -1), node_to_partition.get(v, -1)
@@ -377,15 +350,10 @@ def process_place(place,road_type_weights,version, k=3,dist=5000, cache_dir='./c
             "is_cut": pu != pv
         })
 
-    # 输出路径
-    json_dir = os.path.join(base_dir, safe_name, version, today_str)
-    weight_map_dir = os.path.join(base_dir, "edge_weight_maps")
-    os.makedirs(json_dir, exist_ok=True)
     json_filename = f"edges_partitions_k{k}.json"
     if lane_weight_version:
         json_filename = f"{lane_weight_version}_" + json_filename
-    json_path = os.path.join(json_dir, json_filename)
-
+    json_path = os.path.join(date_dir, json_filename)
     with open(json_path, "w") as f_json:
         json.dump({"edges": edge_partition_info}, f_json, indent=2)
     print(f"Partitioned edge info saved to: {json_path}")
@@ -407,22 +375,19 @@ if __name__ == "__main__":
     parser.add_argument("--csv_path", type=str, default="results.csv")
 
     args = parser.parse_args()
-    base_dir = os.path.abspath(os.path.expanduser(
-        os.environ.get("RESULT_BASE") or
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "result")
-    ))
-    os.makedirs(base_dir, exist_ok=True)
 
-    # 展开 ~
+    # Expand and resolve CSV path
     csv_path = os.path.expanduser(args.csv_path)
-    # 如果是相对路径，就挂到 base_dir
     if not os.path.isabs(csv_path):
+        base_dir = os.path.abspath(os.path.expanduser(
+            os.environ.get("RESULT_BASE") or
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "result")
+        ))
+        os.makedirs(base_dir, exist_ok=True)
         csv_path = os.path.join(base_dir, csv_path)
-
 
     road_type_weights = load_weights(args.road_type_version, args.road_type_path)
     lane_weight_config = load_lane_weights(args.lane_weight_version, args.lane_weight_path)
-
 
     process_place(
         place=args.place,

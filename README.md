@@ -95,7 +95,7 @@ min_balanced_cut/
 
 ## 4. Data Flow
 
-1.  **Input**
+### 4.1  **Input**
     
     -   Place name (`--place`, e.g., `"Karlsruhe, Germany"`)
         
@@ -103,7 +103,7 @@ min_balanced_cut/
         
     -   Weight files: `road_type_weights.json`, `lane_weight_version.json`
         
-2.  **Processing**
+### 4.2  **Processing**
     
     -   `osm_loader.load_graph(place, dist)` → GraphML cache under `cached_maps/`
         
@@ -121,7 +121,7 @@ min_balanced_cut/
         
     -   Compute cut edges, cut ratios
         
-3.  **Output**
+### 4.3  **Output**
     
     -   **PNG** (`result/<place>/<version>/<YYYY-MM-DD>/[run...].png`)
         

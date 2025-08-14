@@ -5,24 +5,26 @@ import osmnx as ox
 import geopandas as gpd
 from typing import Dict, Any, Tuple
 
+
 def read_kahip_json(json_path: str) -> Dict[str, Any]:
+    """Read KaHIP result JSON."""
     with open(json_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def parse_from_json(G: nx.Graph, data: Dict[str, Any]) -> Tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
 
+def parse_from_json(G: nx.Graph, data: Dict[str, Any]) -> Tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+    """Attach partition and cut info from JSON to GeoDataFrames."""
     nodes_gdf, edges_gdf = ox.graph_to_gdfs(G)
 
     if "edges" not in data:
-        raise ValueError("JSON 缺少 'edges' 字段。")
+        raise ValueError("Missing 'edges' in JSON.")
 
-    # 将 (u,v,key) 做映射，填回 edges_gdf
+    # Map (u,v,key) -> (part_u, part_v, is_cut)
     mapping = {}
     for e in data["edges"]:
-        u = e["u"]; v = e["v"]
-        k = e.get("key", 0)  # 你的 JSON 未写 key，就按 0 处理
-        pu = int(e.get("partition_u", -1))
-        pv = int(e.get("partition_v", -1))
+        u, v = e["u"], e["v"]
+        k = e.get("key", 0)
+        pu, pv = int(e.get("partition_u", -1)), int(e.get("partition_v", -1))
         cut = bool(e.get("is_cut", pu != pv))
         mapping[(u, v, k)] = (pu, pv, cut)
 
@@ -33,12 +35,14 @@ def parse_from_json(G: nx.Graph, data: Dict[str, Any]) -> Tuple[gpd.GeoDataFrame
         part_v_arr.append(pv)
         is_cut_arr.append(cut)
 
+    # Add to edges_gdf
     edges_gdf = edges_gdf.copy()
     edges_gdf["part_u"] = part_u_arr
     edges_gdf["part_v"] = part_v_arr
     edges_gdf["is_cut"] = is_cut_arr
-    edges_gdf["part"]   = np.where(edges_gdf["is_cut"], -1, edges_gdf["part_u"])
+    edges_gdf["part"] = np.where(edges_gdf["is_cut"], -1, edges_gdf["part_u"])
 
+    # Default node part
     nodes_gdf["part"] = -1
 
     return nodes_gdf, edges_gdf

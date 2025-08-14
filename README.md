@@ -165,7 +165,7 @@ python graph_partition_gui.py
 python run_experiments_from_json.py
 Iterates over parameter_combinations_part1.json and appends to the daily CSV
 
-## ## 7. Outputs & Conventions
+## 7. Outputs & Conventions
 
 -   **Results root**: taken from env `RESULT_BASE`, else `./result/`
     

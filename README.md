@@ -41,7 +41,7 @@ min_balanced_cut/
 ├── cached_maps/                # (ignored) GraphML cache by place
 ├── outputs/                    # (ignored) Folium HTML maps, temp CSV, etc.
 └── result/                     # (ignored) Dated run outputs: PNG, CSV, JSON by place/version/date
-
+```
 
 
 

@@ -103,16 +103,25 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("OSM Partition Viewer")
         self.resize(1200, 800)
 
+        # Store current alpha, beta, gamma values
+        self.params = {"alpha": 1.00, "beta": 1.00, "gamma": 1.00}
+        # Integer-to-float scale factor (100 means each slider step = 0.01)
+        self._scale = 100  
+
         # State variables
         self._map_cache = {}
         self._running = False
         self._has_ever_run = False   # Must click Run for the first time
-        self._debounce = QTimer(self)
-        self._debounce.setSingleShot(True)
-        self._debounce.setInterval(400)
-        self._debounce.timeout.connect(self._run_partition_async)
+        # Track whether some manual-only params changed and require a manual run
         self._pending_manual = False
         self._manual_dirty_style = "background:#ffe9a8;"
+
+
+        # Debounce timer for slider-driven auto recomputation
+        self._debounce_auto = QTimer(self)
+        self._debounce_auto.setSingleShot(True)
+        self._debounce_auto.setInterval(200)     # 200 ms debounce
+        self._debounce_auto.timeout.connect(self.on_params_finalized)
 
         # Layout setup
         central = QWidget(self)
@@ -137,15 +146,33 @@ class MainWindow(QMainWindow):
         row2.addWidget(self.spin_k)
 
         # Alpha / beta / gamma sliders (0–5, represented as 0–500 for precision)
-        def add_slider(caption, init=100):
+        def add_param_slider(caption: str, key: str, init_float: float = 1.00):
+            """
+            Build a row: [caption label] [slider] [value label].
+            Returns the slider and its value label.
+            """
             box = QHBoxLayout(); left.addLayout(box)
             box.addWidget(QLabel(caption))
-            s = QSlider(Qt.Orientation.Horizontal); s.setRange(0, 500); s.setValue(init)
+
+            s = QSlider(Qt.Orientation.Horizontal)
+            s.setRange(0, int(5.00 * self._scale))                 # 0.00 ~ 5.00
+            s.setValue(int(init_float * self._scale))              # default = 1.00
+            s.setSingleStep(1)                                     # 0.01 per tick
+            s.setPageStep(10)                                      # 0.10 per page step
             box.addWidget(s, 1)
-            return s
-        self.sld_alpha = add_slider("alpha", 100)
-        self.sld_beta  = add_slider("beta", 100)
-        self.sld_gamma = add_slider("gamma", 100)
+
+            val_label = QLabel(f"{init_float:.2f}")
+            val_label.setMinimumWidth(48)
+            val_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            box.addWidget(val_label)
+
+            # Update numeric label live, store param, and start debounce
+            s.valueChanged.connect(lambda v: self._on_slider_change(v, key, val_label))
+            return s, val_label
+
+        self.sld_alpha, self.lbl_alpha_val = add_param_slider("alpha", "alpha", 1.00)
+        self.sld_beta,  self.lbl_beta_val  = add_param_slider("beta",  "beta",  1.00)
+        self.sld_gamma, self.lbl_gamma_val = add_param_slider("gamma", "gamma", 1.00)
 
         # Version selectors (dropdown)
         row3 = QHBoxLayout(); left.addLayout(row3)
@@ -265,6 +292,17 @@ class MainWindow(QMainWindow):
         self.cmb_road_ver.currentIndexChanged.connect(self._on_manual_param_changed)
         self.cmb_lane_ver.currentIndexChanged.connect(self._on_manual_param_changed)
 
+    def _on_slider_change(self, v: int, key: str, value_label: QLabel):
+        """
+        Live-update numeric label and store parameter when a slider moves.
+        Also start/restart the debounce timer for potential auto-run.
+        """
+        val = v / self._scale
+        value_label.setText(f"{val:.2f}")
+        self.params[key] = val
+        self._debounce_auto.start()
+
+
     def _on_auto_params_changed(self, *args):
         """Automatically run when auto-trigger parameters change (if applicable)."""
         if not self._has_ever_run:
@@ -272,22 +310,37 @@ class MainWindow(QMainWindow):
         if self._pending_manual:
             return
         if self._running:
-            self._debounce.stop()
+            self._debounce_auto.stop()
             return
-        self._debounce.start()
+        self._debounce_auto.start()
 
     def _on_manual_param_changed(self, *args):
         """Mark state as requiring manual Run after parameters change."""
         if self._pending_manual:
             return
         self._pending_manual = True
-        self._debounce.stop()
+        self._debounce_auto.stop()
         self._log("Parameters changed that require manual run. Click 'Run / Update' to apply.")
         self.btn_run.setStyleSheet(self._manual_dirty_style)
 
     # Run pipeline 
     def _on_run_clicked(self):
         self._run_partition_async()
+
+    def on_params_finalized(self):
+        """
+        Called once after sliders stop moving (debounced).
+        Only runs if we've done at least one manual run, there are no pending
+        manual-only changes, and no run is currently in progress.
+        """
+        if not self._has_ever_run:
+            return
+        if self._pending_manual:
+            return
+        if self._running:
+            return
+        self._run_partition_async()
+
 
     def _run_partition_async(self):
         if self._running:
@@ -348,9 +401,9 @@ class MainWindow(QMainWindow):
             place=self.edit_place.text().strip(),
             dist=int(self.spin_dist.value()),
             k=int(self.spin_k.value()),
-            alpha=self.sld_alpha.value() / 100.0,
-            beta=self.sld_beta.value() / 100.0,
-            gamma=self.sld_gamma.value() / 100.0,
+            alpha=self.sld_alpha.value() / self._scale,
+            beta=self.sld_beta.value() / self._scale,
+            gamma=self.sld_gamma.value() / self._scale,
             road_ver=self.cmb_road_ver.currentText().strip() or "all_1",
             lane_ver=self.cmb_lane_ver.currentText().strip() or "v1",
         )

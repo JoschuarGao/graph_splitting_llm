@@ -3,10 +3,11 @@ import sys
 import subprocess
 from datetime import datetime
 from typing import Dict, Any, Optional
+from collections.abc import Iterable
 
 from core.config import (
     KAHIP_PY_PATH,
-    KAHIP_CLI_ARGS,  
+    KAHIP_CLI_ARGS,
     OUTPUT_DIR,
     CACHE_DIR,
     RESULT_BASE,
@@ -14,7 +15,7 @@ from core.config import (
 
 # Default File Names for Weights
 # These default filenames are used if the calling code does not specify a path.
-ROAD_TYPE_FILE = "road_type_weights.json"     
+ROAD_TYPE_FILE = "road_type_weights.json"
 LANE_WEIGHT_FILE = "lane_weight_version.json"
 
 
@@ -22,6 +23,28 @@ LANE_WEIGHT_FILE = "lane_weight_version.json"
 def _safe(s: str) -> str:
     """Convert a string to a safe format for filenames by removing commas and replacing spaces with underscores."""
     return s.replace(",", "").replace(" ", "_")
+
+
+def _normalize_road_types(value: Any) -> Optional[str]:
+    """
+    Normalize road_types into a comma-separated string acceptable for CLI.
+
+    Accepts:
+      - None
+      - str (already comma-separated)
+      - Iterable[str] (list/tuple/set)
+
+    Returns:
+      - str or None
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, Iterable):
+        items = [str(x).strip() for x in value if str(x).strip()]
+        return ",".join(items) if items else None
+    return None
 
 
 def build_kahip_cmd(params: Dict[str, Any]) -> list:
@@ -58,6 +81,13 @@ def build_kahip_cmd(params: Dict[str, Any]) -> list:
     # Lane Weights (version + path) — if path is missing, use default file
     add_arg("lane_weight_version", params.get("lane_weight_version"))
     add_arg("lane_weight_path", params.get("lane_weight_path") or LANE_WEIGHT_FILE)
+
+    # Optional: explicit output directory (if your KaHIP.py supports it)
+    add_arg("output_dir", params.get("output_dir"))
+
+    # NEW: Road types filter (comma-separated)
+    rt = _normalize_road_types(params.get("road_types"))
+    add_arg("road_types", rt)
 
     return cmd
 
@@ -108,11 +138,6 @@ def _fallback_find_json(params: Dict[str, Any]) -> Optional[str]:
 def run_kahip(params: Dict[str, Any] = None, **kwargs) -> str:
     """
     Run KaHIP.py with the provided parameters.
-
-    Supports two calling styles:
-        run_kahip(params=dict(...))
-        run_kahip(place=..., k=..., ...)
-
     Returns:
         Path to the generated JSON file from KaHIP.py.
     """
@@ -129,6 +154,10 @@ def run_kahip(params: Dict[str, Any] = None, **kwargs) -> str:
     # Automatically set default weight paths if not provided
     params.setdefault("road_type_path", ROAD_TYPE_FILE)
     params.setdefault("lane_weight_path", LANE_WEIGHT_FILE)
+
+    # Normalize road_types early (so both build_kahip_cmd and logging use the same form)
+    if "road_types" in params:
+        params["road_types"] = _normalize_road_types(params["road_types"])
 
     # Check required parameters (as per KaHIP.py argparse requirements)
     required = ["place", "k", "dist", "road_type_version", "lane_weight_version"]

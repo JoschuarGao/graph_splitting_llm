@@ -40,6 +40,8 @@ KAHIP_CLI_ARGS = {
     "beta": "--beta",
     "gamma": "--gamma",
     "csv_path": "--csv_path",
+    "output_dir": "--output_dir", 
+    "road_types": "--road_types"
 }
 
 # Backward compatibility (if other files mistakenly use ARG_MAP)

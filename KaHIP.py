@@ -31,6 +31,30 @@ def load_lane_weights(version=None, path="lane_weight_version.json"):
             return all_weights.get(version, None)
     return None
 
+# Highway filtering utilities
+def _edge_has_allowed_highway(edge_data, allowed: set) -> bool:
+    """edge_data['highway'] may be str or list; keep if it matches any in allowed."""
+    if allowed is None:
+        return True
+    hw = edge_data.get("highway")
+    if hw is None:
+        return False
+    if isinstance(hw, (list, tuple, set)):
+        return any((str(h) in allowed) for h in hw)
+    return str(hw) in allowed
+
+def filter_graph_by_highway(G: nx.Graph, allowed: set) -> nx.Graph:
+    """Return a subgraph containing only edges with highway types in allowed (preserving node attributes)."""
+    if allowed is None:
+        return G
+    H = G.__class__()  # Preserve graph type
+    H.add_nodes_from(G.nodes(data=True))
+    for u, v, data in G.edges(data=True):
+        if _edge_has_allowed_highway(data, allowed):
+            H.add_edge(u, v, **data)
+    return H
+
+
 
 def write_metis_weighted(G, path):
     """
@@ -167,7 +191,8 @@ def plot_edge_weights(G, save_path=None, title="Edge Weight Visualization"):
 
 
 def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='./cached_maps', csv_path="results.csv",
-                  lane_weight_config=None, lane_weight_version=None, alpha=1.0, beta=1.0, gamma=0.1):
+                  lane_weight_config=None, lane_weight_version=None, alpha=1.0, beta=1.0, gamma=0.1,
+                  road_types=None, output_dir=None):
     """
     Main function for processing a place:
     - Load or download road network
@@ -190,6 +215,16 @@ def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='
     G_original = G_original.to_undirected()
     G = nx.Graph(G_original)
     G.remove_edges_from(nx.selfloop_edges(G))
+
+    allowed = None
+    if road_types:
+        if isinstance(road_types, str):
+            allowed = set(t.strip() for t in road_types.split(",") if t.strip())
+        else:
+            allowed = set(map(str, road_types))
+    G = filter_graph_by_highway(G, allowed)
+    if G.number_of_edges() == 0:
+        raise ValueError("No edges left after filtering by road_types. Try selecting more highway types.")
 
     # Assign edge weights
     for u, v, data in G.edges(data=True):
@@ -293,10 +328,9 @@ def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='
 
     # Save main figure
     today_str = datetime.now().strftime("%Y-%m-%d")
-    base_dir = os.path.abspath(os.path.expanduser(
-        os.environ.get("RESULT_BASE") or
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "result")
-    ))
+    base_dir = output_dir or os.environ.get("RESULT_BASE") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "result")
+    base_dir = os.path.abspath(os.path.expanduser(base_dir))
+
     date_dir = os.path.join(base_dir, safe_name, version, today_str)
     os.makedirs(date_dir, exist_ok=True)
     run_index = len([f for f in os.listdir(date_dir) if f.startswith("run") and f.endswith(".png")]) + 1
@@ -373,6 +407,10 @@ if __name__ == "__main__":
     parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--gamma", type=float, default=0.1)
     parser.add_argument("--csv_path", type=str, default="results.csv")
+    parser.add_argument("--output_dir", type=str, default=None,
+                        help="Override result base directory (default uses RESULT_BASE or ./result).")
+    parser.add_argument("--road_types", type=str, default=None,
+                        help="Comma-separated OSM 'highway' types to include (e.g. 'motorway,primary,secondary').")
 
     args = parser.parse_args()
 
@@ -401,5 +439,8 @@ if __name__ == "__main__":
         lane_weight_version=args.lane_weight_version,
         alpha=args.alpha,
         beta=args.beta,
-        gamma=args.gamma
+        gamma=args.gamma,
+        road_types=args.road_types,
+        output_dir=args.output_dir,
     )
+

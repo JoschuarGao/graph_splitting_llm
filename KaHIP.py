@@ -85,6 +85,7 @@ def write_metis_weighted(G, path):
         f.write(f"{len(node_list)} {len(written_edges)} 1\n")
         for line in edge_lines:
             f.write(line + "\n")
+    return node_list
 
 
 def generate_csv_path(base_dir=None):
@@ -211,10 +212,17 @@ def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='
         G_original = ox.graph_from_address(place, dist=dist, network_type="drive")
         ox.save_graphml(G_original, cache_path)
 
-    # Convert to undirected and remove self-loops
-    G_original = G_original.to_undirected()
-    G = nx.Graph(G_original)
+    try:
+        from osmnx import utils_graph as _ug
+        G_undirected = _ug.get_undirected(G_original, merge_edges=True)
+    except Exception:
+        try:
+            G_undirected = ox.get_undirected(G_original)
+        except Exception:
+            G_undirected = G_original.to_undirected()
+    G = nx.Graph(G_undirected)
     G.remove_edges_from(nx.selfloop_edges(G))
+
 
     allowed = None
     if road_types:
@@ -245,6 +253,7 @@ def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='
         else:
             lane_factor = 1
 
+
         # Get road length
         length = data.get("length", 1)
         # Use a smoothed factor for length
@@ -255,9 +264,14 @@ def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='
         total_weight = alpha * base_weight + beta * lane_factor + gamma * scaled_weight
         data["weight"] = max(0.2, min(total_weight, 10))
 
+    SCALE = 1000
+    for u, v, data in G.edges(data=True):
+        w = data.get("weight", 1.0)
+        data["weight"] = int(round(w * SCALE))
+
     # Write graph to temporary METIS file
     tmp_graph_path = tempfile.NamedTemporaryFile(suffix=".metis", delete=False).name
-    write_metis_weighted(G, tmp_graph_path)
+    node_list = write_metis_weighted(G, tmp_graph_path)
 
     # Partition the graph using KaMinPar
     instance = kaminpar.KaMinPar(num_threads=1, ctx=kaminpar.default_context())
@@ -265,7 +279,6 @@ def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='
     partition = instance.compute_partition(graph, k=k, eps=0.1)
 
     # Map node to partition
-    node_list = list(G.nodes())
     node_to_partition = {node: partition[i] for i, node in enumerate(node_list)}
 
     # Collect cut edges

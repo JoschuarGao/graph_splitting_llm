@@ -4,6 +4,7 @@ import osmnx as ox
 import matplotlib.pyplot as plt
 import math
 import tempfile
+import time
 import argparse
 import kaminpar
 import json
@@ -105,27 +106,35 @@ def generate_csv_path(base_dir=None):
     return os.path.join(csv_dir, f"results_{today_str}_run_{run_index:04d}.csv")
 
 
-def save_result_to_csv(city, version, k, cut_count, cut_weight, total_weight, csv_path, lane_weight_version=None, alpha=1.0, beta=1.0, gamma=0.1):
+def save_result_to_csv(place, version, k, cut_count, cut_weight, total_weight,
+                       csv_path, lane_weight_version=None,
+                       alpha=1.0, beta=1.0, gamma=0.1,
+                       png_path=None, json_path=None, run_seconds=None):
     """
     Append partition results to a CSV file, creating headers if file does not exist.
+    Writes weighted cut ratio only (cut_edge_weight_sum / total_weight).
     """
     file_exists = os.path.isfile(csv_path)
     with open(csv_path, mode="a", newline='') as f:
         writer = csv.writer(f)
         if not file_exists:
             writer.writerow([
-                "city", "weight_version", "lane_weight_version", "k",
+                "ts", "place", "weight_version", "lane_weight_version", "k",
                 "cut_edge_count", "cut_edge_weight_sum", "total_weight",
-                "alpha", "beta", "gamma", "cut_ratio"
+                "alpha", "beta", "gamma",
+                "cut_ratio", "png_path", "json_path", "run_seconds"
             ])
 
-        cut_ratio = cut_weight / total_weight if total_weight > 0 else 0
-        writer.writerow([
-            city, version, lane_weight_version, k,
-            cut_count, cut_weight, total_weight,
-            alpha, beta, gamma, f"{cut_ratio:.4f}"
-        ])
+        ts = datetime.now().isoformat(timespec="seconds")
+        cut_ratio = (float(cut_weight) / float(total_weight)) if total_weight else 0.0
 
+        writer.writerow([
+            ts, place, version, lane_weight_version, k,
+            int(cut_count), f"{float(cut_weight):.6f}", f"{float(total_weight):.6f}",
+            float(alpha), float(beta), float(gamma),
+            f"{float(cut_ratio):.6f}",
+            png_path or "", json_path or "", f"{(run_seconds or 0.0):.2f}"
+        ])
 
 def plot_edge_weights(G, save_path=None, title="Edge Weight Visualization"):
     """
@@ -204,6 +213,7 @@ def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='
     safe_name = place.replace(",", "").replace(" ", "_")
     os.makedirs(cache_dir, exist_ok=True)
     cache_path = os.path.join(cache_dir, f"{safe_name}.graphml")
+    t0 = time.time()  # runtime
 
     # Load cached graph or download from OSM
     if os.path.exists(cache_path):
@@ -261,8 +271,8 @@ def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='
 
         # Scale weights with alpha, beta, gamma
         scaled_weight = math.log1p(length_factor)
-        total_weight = alpha * base_weight + beta * lane_factor + gamma * scaled_weight
-        data["weight"] = max(0.2, min(total_weight, 10))
+        edge_weight = alpha * base_weight + beta * lane_factor + gamma * scaled_weight
+        data["weight"] = max(0.2, min(edge_weight, 10))
 
     SCALE = 1000
     for u, v, data in G.edges(data=True):
@@ -277,6 +287,12 @@ def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='
     instance = kaminpar.KaMinPar(num_threads=1, ctx=kaminpar.default_context())
     graph = kaminpar.load_graph(tmp_graph_path, kaminpar.GraphFileFormat.METIS, compress=False)
     partition = instance.compute_partition(graph, k=k, eps=0.1)
+
+    try:
+        os.unlink(tmp_graph_path)
+    except OSError:
+        pass
+
 
     # Map node to partition
     node_to_partition = {node: partition[i] for i, node in enumerate(node_list)}
@@ -293,7 +309,7 @@ def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='
             cut_edges.append((u_xy, v_xy, pu, pv))
             cut_weight_total += G.get_edge_data(u, v).get("weight", 1.0)
 
-    cut_ratio = cut_weight_total / total_weight if total_weight > 0 else 0
+    cut_ratio = (cut_weight_total / total_weight) if total_weight > 0 else 0.0
 
     # Draw partition visualization
     pos = {node: (data["x"], data["y"]) for node, data in G.nodes(data=True) if "x" in data and "y" in data}
@@ -354,6 +370,29 @@ def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='
     plt.savefig(save_path, dpi=300)
     plt.close(fig)
     print(f"Figure saved to: {save_path}")
+    print(f"PNG_PATH={save_path}") 
+
+    # Save edge partition info JSON 
+    edge_partition_info = []
+    for u, v, data in G.edges(data=True):
+        pu, pv = node_to_partition.get(u, -1), node_to_partition.get(v, -1)
+        edge_partition_info.append({
+            "u": u,
+            "v": v,
+            "partition_u": pu,
+            "partition_v": pv,
+            "weight": data.get("weight", 1.0),
+            "is_cut": pu != pv
+        })
+
+    json_filename = f"edges_partitions_k{k}.json"
+    if lane_weight_version:
+        json_filename = f"{lane_weight_version}_" + json_filename
+    json_path = os.path.join(date_dir, json_filename)
+    with open(json_path, "w") as f_json:
+        json.dump({"edges": edge_partition_info}, f_json, indent=2)
+    print(f"Partitioned edge info saved to: {json_path}")
+    print(f"JSON_PATH={json_path}")  
 
     # Save sub-partition figures
     for pid in range(k):
@@ -379,31 +418,24 @@ def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='
         plt.close(fig_sub)
         print(f"Saved sub-partition figure: {part_save_path}")
 
-    # Save results to CSV
+    # Runtime and CSV 
+    run_seconds = time.time() - t0
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-    save_result_to_csv(place, version, k, len(cut_edges), cut_weight_total, total_weight,
-                       csv_path, lane_weight_version, alpha=alpha, beta=beta, gamma=gamma)
+    save_result_to_csv(
+        place, version, k,
+        cut_count=len(cut_edges),
+        cut_weight=cut_weight_total,
+        total_weight=total_weight,
+        csv_path=csv_path,
+        lane_weight_version=lane_weight_version,
+        alpha=alpha, beta=beta, gamma=gamma,
+        png_path=save_path,
+        json_path=json_path,
+        run_seconds=run_seconds
+    )
 
-    # Save edge partition info for GNN or further analysis
-    edge_partition_info = []
-    for u, v, data in G.edges(data=True):
-        pu, pv = node_to_partition.get(u, -1), node_to_partition.get(v, -1)
-        edge_partition_info.append({
-            "u": u,
-            "v": v,
-            "partition_u": pu,
-            "partition_v": pv,
-            "weight": data.get("weight", 1.0),
-            "is_cut": pu != pv
-        })
 
-    json_filename = f"edges_partitions_k{k}.json"
-    if lane_weight_version:
-        json_filename = f"{lane_weight_version}_" + json_filename
-    json_path = os.path.join(date_dir, json_filename)
-    with open(json_path, "w") as f_json:
-        json.dump({"edges": edge_partition_info}, f_json, indent=2)
-    print(f"Partitioned edge info saved to: {json_path}")
+    
 
 
 if __name__ == "__main__":

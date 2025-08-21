@@ -264,7 +264,8 @@ def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='
     """
     safe_name = place.replace(",", "").replace(" ", "_")
     os.makedirs(cache_dir, exist_ok=True)
-    cache_path = os.path.join(cache_dir, f"{safe_name}.graphml")
+    cache_key = f"{safe_name}_d{int(dist)}"
+    cache_path = os.path.join(cache_dir, f"{cache_key}.graphml")
     t0 = time.time()  # runtime
 
     # Load cached graph or download from OSM

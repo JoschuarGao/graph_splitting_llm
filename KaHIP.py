@@ -9,7 +9,8 @@ import argparse
 import kaminpar
 import json
 import csv
-import matplotlib.cm as cm
+import matplotlib as mpl
+from matplotlib import cm
 import matplotlib.colors as mcolors
 from collections import defaultdict
 from shapely.geometry import LineString
@@ -88,6 +89,41 @@ def write_metis_weighted(G, path):
             f.write(line + "\n")
     return node_list
 
+def write_metis_fmt11_with_node_weights(G, path):
+    """
+    Write METIS with node weights (workload) + edge weights (cut objective).
+    fmt=11 means: node weights present AND edge weights present.
+    Node weight here ~= sum of incident edge weights / 2.
+    """
+    node_list = list(G.nodes())
+    node_map = {n: i+1 for i, n in enumerate(node_list)}
+
+    node_w = [0.0] * len(node_list)
+    for u, v, d in G.edges(data=True):
+        w = float(d.get("weight", 1.0))
+        node_w[node_map[u]-1] += 0.5 * w
+        node_w[node_map[v]-1] += 0.5 * w
+
+    written = set()
+    lines = [""] * len(node_list)
+    for u, v, d in G.edges(data=True):
+        ek = (u, v) if u <= v else (v, u)
+        if ek in written:
+            continue
+        written.add(ek)
+        w = int(max(1, round(float(d.get("weight", 1.0)))))
+        ui, vi = node_map[u]-1, node_map[v]-1
+        lines[ui] += f"{node_map[v]} {w} "
+        lines[vi] += f"{node_map[u]} {w} "
+
+    with open(path, "w") as f:
+        f.write(f"{len(node_list)} {len(written)} 11\n")  # fmt=11: node+edge weights
+        for i in range(len(node_list)):
+            nw = max(1, int(round(node_w[i])))  
+            f.write(f"{nw} {lines[i]}\n")
+    return node_list
+
+
 
 def generate_csv_path(base_dir=None):
     """
@@ -106,7 +142,7 @@ def generate_csv_path(base_dir=None):
     return os.path.join(csv_dir, f"results_{today_str}_run_{run_index:04d}.csv")
 
 
-def save_result_to_csv(place, version, k, cut_count, cut_weight, total_weight,
+def save_result_to_csv(place, version, k, dist, cut_count, cut_weight, total_weight,
                        csv_path, lane_weight_version=None,
                        alpha=1.0, beta=1.0, gamma=0.1,
                        png_path=None, json_path=None, run_seconds=None):
@@ -114,27 +150,43 @@ def save_result_to_csv(place, version, k, cut_count, cut_weight, total_weight,
     Append partition results to a CSV file, creating headers if file does not exist.
     Writes weighted cut ratio only (cut_edge_weight_sum / total_weight).
     """
-    file_exists = os.path.isfile(csv_path)
-    with open(csv_path, mode="a", newline='') as f:
-        writer = csv.writer(f)
+    ts = datetime.now().isoformat(timespec="seconds")
+    cut_ratio = (float(cut_weight) / float(total_weight)) if total_weight else 0.0
+
+    row = {
+        "ts": ts,
+        "place": place,
+        "dist": int(dist),
+        "weight_version": version,
+        "lane_weight_version": lane_weight_version,
+        "k": int(k),
+        "cut_edge_count": int(cut_count),
+        "cut_edge_weight_sum": float(cut_weight),
+        "total_weight": float(total_weight),
+        "alpha": float(alpha),
+        "beta": float(beta),
+        "gamma": float(gamma),
+        "cut_ratio": float(cut_ratio),
+        "png_path": png_path or "",
+        "json_path": json_path or "",
+        "run_seconds": float(run_seconds or 0.0),
+    }
+
+    fieldnames = [
+        "ts", "place", "dist", "weight_version", "lane_weight_version", "k",
+        "cut_edge_count", "cut_edge_weight_sum", "total_weight",
+        "alpha", "beta", "gamma",
+        "cut_ratio", "png_path", "json_path", "run_seconds"
+    ]
+
+    file_exists = os.path.isfile(csv_path) and os.path.getsize(csv_path) > 0
+    with open(csv_path, mode="a", newline='', encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         if not file_exists:
-            writer.writerow([
-                "ts", "place", "weight_version", "lane_weight_version", "k",
-                "cut_edge_count", "cut_edge_weight_sum", "total_weight",
-                "alpha", "beta", "gamma",
-                "cut_ratio", "png_path", "json_path", "run_seconds"
-            ])
+            writer.writeheader()
+        writer.writerow(row)
 
-        ts = datetime.now().isoformat(timespec="seconds")
-        cut_ratio = (float(cut_weight) / float(total_weight)) if total_weight else 0.0
 
-        writer.writerow([
-            ts, place, version, lane_weight_version, k,
-            int(cut_count), f"{float(cut_weight):.6f}", f"{float(total_weight):.6f}",
-            float(alpha), float(beta), float(gamma),
-            f"{float(cut_ratio):.6f}",
-            png_path or "", json_path or "", f"{(run_seconds or 0.0):.2f}"
-        ])
 
 def plot_edge_weights(G, save_path=None, title="Edge Weight Visualization"):
     """
@@ -158,7 +210,7 @@ def plot_edge_weights(G, save_path=None, title="Edge Weight Visualization"):
         return
 
     norm = mcolors.Normalize(vmin=min(weights), vmax=max(weights))
-    cmap = cm.get_cmap("tab20")
+    cmap = mpl.colormaps.get_cmap("tab20")
     edge_colors = [cmap(norm(weight)) for weight in weights]
 
     fig, ax = plt.subplots(figsize=(10, 10))
@@ -219,8 +271,12 @@ def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='
     if os.path.exists(cache_path):
         G_original = ox.load_graphml(cache_path)
     else:
-        G_original = ox.graph_from_address(place, dist=dist, network_type="drive")
+        try:
+            G_original = ox.graph_from_place(place, network_type="drive")
+        except Exception:
+            G_original = ox.graph_from_address(place, dist=dist, network_type="drive")
         ox.save_graphml(G_original, cache_path)
+
 
     try:
         from osmnx import utils_graph as _ug
@@ -281,7 +337,8 @@ def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='
 
     # Write graph to temporary METIS file
     tmp_graph_path = tempfile.NamedTemporaryFile(suffix=".metis", delete=False).name
-    node_list = write_metis_weighted(G, tmp_graph_path)
+    node_list = write_metis_fmt11_with_node_weights(G, tmp_graph_path)
+
 
     # Partition the graph using KaMinPar
     instance = kaminpar.KaMinPar(num_threads=1, ctx=kaminpar.default_context())
@@ -315,7 +372,7 @@ def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='
     pos = {node: (data["x"], data["y"]) for node, data in G.nodes(data=True) if "x" in data and "y" in data}
     weights = [data.get("weight", 1.0) for _, _, data in G.edges(data=True)]
     norm = mcolors.Normalize(vmin=min(weights), vmax=max(weights))
-    cmap = cm.get_cmap("tab20c")
+    cmap = mpl.colormaps.get_cmap("tab20c")
     edge_colors = [cmap(norm(weight)) for weight in weights]
 
     fig, ax = plt.subplots(figsize=(10, 10))
@@ -405,7 +462,7 @@ def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='
         weights_sub = [data.get("weight", 1.0) for _, _, data in subgraph.edges(data=True)]
         if weights_sub:
             norm_sub = mcolors.Normalize(vmin=min(weights_sub), vmax=max(weights_sub))
-            cmap_sub = cm.get_cmap("tab20c")
+            cmap_sub = mpl.colormaps.get_cmap("tab20c")
             edge_colors = [cmap_sub(norm_sub(w)) for w in weights_sub]
             nx.draw_networkx_edges(subgraph, sub_pos, edge_color=edge_colors, width=2, ax=ax_sub)
         nx.draw_networkx_nodes(subgraph, sub_pos, node_size=1, ax=ax_sub)
@@ -419,10 +476,11 @@ def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='
         print(f"Saved sub-partition figure: {part_save_path}")
 
     # Runtime and CSV 
+    # Runtime and CSV 
     run_seconds = time.time() - t0
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     save_result_to_csv(
-        place, version, k,
+        place, version, k, dist,
         cut_count=len(cut_edges),
         cut_weight=cut_weight_total,
         total_weight=total_weight,
@@ -433,6 +491,8 @@ def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='
         json_path=json_path,
         run_seconds=run_seconds
     )
+    print(f"CSV_PATH={os.path.abspath(csv_path)}")
+    print(f"RUNTIME_SECONDS={run_seconds:.2f}")
 
 
     
@@ -451,7 +511,7 @@ if __name__ == "__main__":
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--gamma", type=float, default=0.1)
-    parser.add_argument("--csv_path", type=str, default="results.csv")
+    parser.add_argument("--csv_path", type=str, default="~/thesis/min_balanced_cut/unified/doe_results.csv")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Override result base directory (default uses RESULT_BASE or ./result).")
     parser.add_argument("--road_types", type=str, default=None,

@@ -5,12 +5,14 @@ OSM Partition Viewer
 import os
 import sys
 import json
-from pathlib import Path
+import subprocess
+import geopandas as gpd
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QSlider, QSpinBox, QTextEdit, QGroupBox, QFormLayout, QComboBox
+    QSlider, QSpinBox, QTextEdit, QGroupBox, QFormLayout, QComboBox,
+    QCheckBox                    
 )
 from PyQt5.QtCore import Qt, QUrl, pyqtSignal, QTimer, QThread
 from PyQt5.QtWebEngineWidgets import QWebEngineView
@@ -21,17 +23,18 @@ from core.kahip_runner import run_kahip
 from core.results_reader import read_kahip_json, parse_from_json
 from gui.visualize import make_map, compute_cut_stats
 from core.config import OUTPUT_DIR
+from diff_merge import merge_driver  # only merge_driver; avoid name clash
 
-# Fixed configuration file names 
+# Fixed configuration file names
 ROAD_TYPE_FILE = "road_type_weights.json"
 LANE_WEIGHT_FILE = "lane_weight_version.json"
 
 
-#  Pipeline Thread 
+# ---------------- Pipeline Thread ----------------
 class PipelineThread(QThread):
     """
-    Thread that runs the partitioning pipeline asynchronously
-    to avoid blocking the UI.
+    Runs the partitioning pipeline in a background thread
+    to keep the UI responsive.
     """
     finished = pyqtSignal(dict)   # {'html': str, 'stats': dict, 'cache_key': tuple}
     log = pyqtSignal(str)
@@ -63,8 +66,8 @@ class PipelineThread(QThread):
                 place=p['place'], k=p['k'], dist=p['dist'],
                 alpha=p['alpha'], beta=p['beta'], gamma=p['gamma'],
                 road_type_version=p['road_ver'],
-                road_type_path=ROAD_TYPE_FILE,             # Fixed filename
-                lane_weight_version=p['lane_ver'],         # Version name only
+                road_type_path=ROAD_TYPE_FILE,
+                lane_weight_version=p['lane_ver'],
             )
             self.log.emit(f"- KaHIP JSON: {json_path}")
 
@@ -85,54 +88,54 @@ class PipelineThread(QThread):
             html = make_map(nodes_gdf, edges_gdf, p['place'], p['k'])
             self.log.emit(f"- HTML map: {html}")
 
-            # Signal completion
+            # Done
             self.finished.emit({'html': html, 'stats': stats, 'cache_key': self.cache_key})
         except Exception as e:
             self.error.emit(str(e))
 
 
-#  Main Window 
+# ---------------- Main Window ----------------
 class MainWindow(QMainWindow):
     """
     Main application window for the OSM Partition Viewer.
-    Provides controls for setting parameters, running KaHIP,
-    and displaying the resulting map and statistics.
     """
     def __init__(self):
         super().__init__()
         self.setWindowTitle("OSM Partition Viewer")
         self.resize(1200, 800)
 
-        # Store current alpha, beta, gamma values
+        # Parameters state
         self.params = {"alpha": 1.00, "beta": 1.00, "gamma": 1.00}
-        # Integer-to-float scale factor (100 means each slider step = 0.01)
-        self._scale = 100  
+        self._scale = 100  # slider scale (step = 0.01)
 
-        # State variables
+        # UI state
         self._map_cache = {}
         self._running = False
-        self._has_ever_run = False   # Must click Run for the first time
-        # Track whether some manual-only params changed and require a manual run
+        self._has_ever_run = False
         self._pending_manual = False
         self._manual_dirty_style = "background:#ffe9a8;"
 
-
-        # Debounce timer for slider-driven auto recomputation
+        # Debounce timer for auto-runs
         self._debounce_auto = QTimer(self)
         self._debounce_auto.setSingleShot(True)
-        self._debounce_auto.setInterval(200)     # 200 ms debounce
+        self._debounce_auto.setInterval(200)
         self._debounce_auto.timeout.connect(self.on_params_finalized)
 
-        # Layout setup
+        # Baseline state (for merge)
+        self._baseline_paths = None   # dict: {merge_json, edges_geojson, nodes_geojson}
+        self._baseline_edges = None   # gpd.GeoDataFrame
+        self._baseline_nodes = None   # gpd.GeoDataFrame
+
+        # ---- Layout ----
         central = QWidget(self)
         self.setCentralWidget(central)
         root = QHBoxLayout(central)
 
-        # Left column (controls and logs)
+        # Left column
         left = QVBoxLayout()
         root.addLayout(left, 0)
 
-        # Place / dist / k inputs
+        # Place / dist / k
         row1 = QHBoxLayout(); left.addLayout(row1)
         row1.addWidget(QLabel("Place"))
         self.edit_place = QLineEdit("Karlsruhe, Germany"); row1.addWidget(self.edit_place, 1)
@@ -145,20 +148,16 @@ class MainWindow(QMainWindow):
         self.spin_k = QSpinBox(); self.spin_k.setRange(2, 64); self.spin_k.setValue(4)
         row2.addWidget(self.spin_k)
 
-        # Alpha / beta / gamma sliders (0–5, represented as 0–500 for precision)
+        # Alpha / beta / gamma sliders
         def add_param_slider(caption: str, key: str, init_float: float = 1.00):
-            """
-            Build a row: [caption label] [slider] [value label].
-            Returns the slider and its value label.
-            """
             box = QHBoxLayout(); left.addLayout(box)
             box.addWidget(QLabel(caption))
 
             s = QSlider(Qt.Orientation.Horizontal)
-            s.setRange(0, int(5.00 * self._scale))                 # 0.00 ~ 5.00
-            s.setValue(int(init_float * self._scale))              # default = 1.00
-            s.setSingleStep(1)                                     # 0.01 per tick
-            s.setPageStep(10)                                      # 0.10 per page step
+            s.setRange(0, int(5.00 * self._scale))     # 0.00 ~ 5.00
+            s.setValue(int(init_float * self._scale))
+            s.setSingleStep(1)                         # 0.01 per step
+            s.setPageStep(10)                          # 0.10 per page step
             box.addWidget(s, 1)
 
             val_label = QLabel(f"{init_float:.2f}")
@@ -166,7 +165,6 @@ class MainWindow(QMainWindow):
             val_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             box.addWidget(val_label)
 
-            # Update numeric label live, store param, and start debounce
             s.valueChanged.connect(lambda v: self._on_slider_change(v, key, val_label))
             return s, val_label
 
@@ -174,7 +172,7 @@ class MainWindow(QMainWindow):
         self.sld_beta,  self.lbl_beta_val  = add_param_slider("beta",  "beta",  1.00)
         self.sld_gamma, self.lbl_gamma_val = add_param_slider("gamma", "gamma", 1.00)
 
-        # Version selectors (dropdown)
+        # Version selectors (must be created before _load_version_lists)
         row3 = QHBoxLayout(); left.addLayout(row3)
         row3.addWidget(QLabel("road_type_version"))
         self.cmb_road_ver = QComboBox(); row3.addWidget(self.cmb_road_ver, 1)
@@ -183,21 +181,35 @@ class MainWindow(QMainWindow):
         row3b.addWidget(QLabel("lane_weight_version"))
         self.cmb_lane_ver = QComboBox(); row3b.addWidget(self.cmb_lane_ver, 1)
 
-        # Reload version lists button
+        # Versions reload
         row_reload = QHBoxLayout(); left.addLayout(row_reload)
         self.btn_reload_versions = QPushButton("Reload versions")
         row_reload.addWidget(self.btn_reload_versions)
         self.btn_reload_versions.clicked.connect(self._load_version_lists)
 
-        # Run / Update button
-        self.btn_run = QPushButton("Run / Update"); left.addWidget(self.btn_run)
+        # Run 
+        self.btn_run = QPushButton("Run"); left.addWidget(self.btn_run)
         self.btn_run.clicked.connect(self._on_run_clicked)
 
-        # Open output folder button
+        # New buttons for baseline & merge
+        self.btn_set_baseline = QPushButton("Partition and set as baseline")
+        left.addWidget(self.btn_set_baseline)
+        self.btn_set_baseline.clicked.connect(self._on_set_baseline)
+
+        self.btn_merge_new = QPushButton("Partition NEW map and merge")
+        left.addWidget(self.btn_merge_new)
+        self.btn_merge_new.clicked.connect(self._on_merge_new)
+
+        # Toggle for showing update layers
+        self.chk_show_updates = QCheckBox("Show updates overlays by default")
+        self.chk_show_updates.setChecked(False) 
+        left.addWidget(self.chk_show_updates)
+
+        # Open output folder
         self.btn_open = QPushButton("Open output folder"); left.addWidget(self.btn_open)
         self.btn_open.clicked.connect(lambda: self._open_dir(OUTPUT_DIR))
 
-        # Top summary label
+        # Top summary
         self.top_summary = QLabel("—")
         self.top_summary.setStyleSheet("color:#222; font-weight:600;")
         left.addWidget(self.top_summary)
@@ -223,39 +235,35 @@ class MainWindow(QMainWindow):
         left.addWidget(QLabel("Run Log / Metrics"))
         self.txt = QTextEdit(); self.txt.setReadOnly(True); left.addWidget(self.txt, 1)
 
-        # Right column (map display)
+        # Right column (map)
         self.web = QWebEngineView(self)
         root.addWidget(self.web, 1)
 
-        # Bind parameter change events
+        # Bind param changes (after widgets exist)
         self._wire_param_changes()
 
-        # Load version options at startup
+        # Finally load version lists into the two combo boxes
         self._load_version_lists(default_road="all_1", default_lane="v1")
 
-    #  Load available versions from JSON 
+    # ---------- Load available versions ----------
     def _load_version_lists(self, default_road="all_1", default_lane="v1"):
         """
-        Load keys from road_type_weights.json and lane_weight_version.json
-        into the dropdown selectors.
+        Read keys from road_type_weights.json and lane_weight_version.json
+        and fill the two combo boxes.
         """
-        def keys_from_json(path):
+        def _keys_from_json(path):
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                if isinstance(data, dict):
-                    return list(data.keys())
-                else:
-                    self._log(f"[WARN] {path} is not a dict; no keys to load.")
-                    return []
+                return list(data.keys()) if isinstance(data, dict) else []
             except Exception as e:
                 self._log(f"[WARN] Cannot read {path}: {e}")
                 return []
 
-        road_keys = keys_from_json(ROAD_TYPE_FILE)
-        lane_keys = keys_from_json(LANE_WEIGHT_FILE)
+        road_keys = _keys_from_json(ROAD_TYPE_FILE)
+        lane_keys = _keys_from_json(LANE_WEIGHT_FILE)
 
-        # Populate road_type_version dropdown
+        # road_type_version
         self.cmb_road_ver.blockSignals(True)
         self.cmb_road_ver.clear()
         if road_keys:
@@ -266,7 +274,7 @@ class MainWindow(QMainWindow):
             self.cmb_road_ver.addItems([default_road])
         self.cmb_road_ver.blockSignals(False)
 
-        # Populate lane_weight_version dropdown
+        # lane_weight_version
         self.cmb_lane_ver.blockSignals(True)
         self.cmb_lane_ver.clear()
         if lane_keys:
@@ -279,32 +287,127 @@ class MainWindow(QMainWindow):
 
         self._log(f"[Versions] road_type={self.cmb_road_ver.currentText()}, lane_weight={self.cmb_lane_ver.currentText()}")
 
-    #  Parameter change event bindings
+    # ---------- KaHIP CLI integration for baseline/merge ----------
+    def _run_kahip_cli(self, place: str, k: int, dist: int, road_ver: str, lane_ver: str) -> dict:
+        """
+        Call KaHIP.py as a subprocess and parse paths from stdout.
+        Requires KaHIP.py to print:
+          RUN_TAG=...
+          MERGE_JSON=...
+          EDGES_GEOJSON=...
+          NODES_GEOJSON=...
+        """
+        cmd = [
+            sys.executable, "KaHIP.py",
+            "--place", place,
+            "--k", str(k),
+            "--dist", str(dist),
+            "--road_type_version", road_ver,
+            "--lane_weight_version", lane_ver,
+            "--csv_path", os.path.expanduser("~/thesis/min_balanced_cut/unified/doe_results.csv")
+        ]
+        self._log(f"[KaHIP] {' '.join(cmd)}")
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        merge_json = edges_geojson = nodes_geojson = run_tag = None
+        for line in p.stdout:
+            line = line.rstrip()
+            self._log(line)
+            if line.startswith("MERGE_JSON="):
+                merge_json = line.split("=", 1)[1].strip()
+            elif line.startswith("EDGES_GEOJSON="):
+                edges_geojson = line.split("=", 1)[1].strip()
+            elif line.startswith("NODES_GEOJSON="):
+                nodes_geojson = line.split("=", 1)[1].strip()
+            elif line.startswith("RUN_TAG="):
+                run_tag = line.split("=", 1)[1].strip()
+        code = p.wait()
+        if code != 0:
+            raise RuntimeError("KaHIP.py exited with non-zero return code.")
+        if not merge_json:
+            raise RuntimeError("Could not parse MERGE_JSON=... from KaHIP.py output.")
+        return dict(
+            merge_json=merge_json,
+            edges_geojson=edges_geojson,
+            nodes_geojson=nodes_geojson,
+            run_tag=run_tag
+        )
+
+    def _on_set_baseline(self):
+        p = self._gather_params()
+        paths = self._run_kahip_cli(
+            place=p["place"], k=p["k"], dist=p["dist"],
+            road_ver=p["road_ver"], lane_ver=p["lane_ver"]
+        )
+        self._baseline_paths = paths
+        # Load baseline GDFs (used for "Removed" layer)
+        self._baseline_edges = gpd.read_file(paths["edges_geojson"]) if paths.get("edges_geojson") and os.path.exists(paths["edges_geojson"]) else None
+        self._baseline_nodes = gpd.read_file(paths["nodes_geojson"]) if paths.get("nodes_geojson") and os.path.exists(paths["nodes_geojson"]) else None
+        self._log(f"[Baseline] MERGE_JSON = {paths['merge_json']}")
+        self.statusBar().showMessage("Baseline set.")
+
+    def _on_merge_new(self):
+        if not self._baseline_paths:
+            self._on_error("Please set a baseline first (Partition and set as baseline).")
+            return
+        p = self._gather_params()
+
+        new_paths = self._run_kahip_cli(
+            place=p["place"], k=p["k"], dist=p["dist"],
+            road_ver=p["road_ver"], lane_ver=p["lane_ver"]
+        )
+
+        out_merged = os.path.join(os.path.dirname(new_paths["merge_json"]), f"merged_{new_paths.get('run_tag','r')}.json")
+        _, _, diff = merge_driver(
+            base_graph=self._baseline_paths["merge_json"],
+            new_graph=new_paths["merge_json"],
+            out_graph=out_merged,
+            strategy="inherit",
+            micro_refine=True,
+            r_hops_micro=1,
+            move_budget=30,
+            r_hops_local=2
+        )
+
+        edges_new = gpd.read_file(new_paths["edges_geojson"]) if new_paths.get("edges_geojson") else None
+        nodes_new = gpd.read_file(new_paths["nodes_geojson"]) if new_paths.get("nodes_geojson") else None
+        edges_old = self._baseline_edges
+
+        # 用复选框决定是否显示更新图层
+        diff_arg = diff if self.chk_show_updates.isChecked() else None
+
+        html = make_map(
+            nodes_gdf=nodes_new if nodes_new is not None else None,
+            edges_gdf=edges_new,
+            place=p["place"],
+            k=p["k"],
+            edges_gdf_old=edges_old,
+            diff=diff_arg
+        )
+        self._load_html(html)
+        if edges_new is not None:
+            self._update_stats_panel(compute_cut_stats(edges_new))
+        self.statusBar().showMessage("Merged and rendered.")
+
+
+    # ---------- Parameter change bindings ----------
     def _wire_param_changes(self):
-        # Auto-trigger parameters (alpha, beta, gamma)
+        # Auto-trigger parameters
         for w in [self.sld_alpha, self.sld_beta, self.sld_gamma]:
             w.valueChanged.connect(self._on_auto_params_changed)
         # Manual-run parameters
         for w in [self.spin_dist, self.spin_k]:
             w.valueChanged.connect(self._on_manual_param_changed)
         self.edit_place.textChanged.connect(self._on_manual_param_changed)
-        # Dropdown changes also require manual run
         self.cmb_road_ver.currentIndexChanged.connect(self._on_manual_param_changed)
         self.cmb_lane_ver.currentIndexChanged.connect(self._on_manual_param_changed)
 
     def _on_slider_change(self, v: int, key: str, value_label: QLabel):
-        """
-        Live-update numeric label and store parameter when a slider moves.
-        Also start/restart the debounce timer for potential auto-run.
-        """
         val = v / self._scale
         value_label.setText(f"{val:.2f}")
         self.params[key] = val
         self._debounce_auto.start()
 
-
     def _on_auto_params_changed(self, *args):
-        """Automatically run when auto-trigger parameters change (if applicable)."""
         if not self._has_ever_run:
             return
         if self._pending_manual:
@@ -315,24 +418,18 @@ class MainWindow(QMainWindow):
         self._debounce_auto.start()
 
     def _on_manual_param_changed(self, *args):
-        """Mark state as requiring manual Run after parameters change."""
         if self._pending_manual:
             return
         self._pending_manual = True
         self._debounce_auto.stop()
-        self._log("Parameters changed that require manual run. Click 'Run / Update' to apply.")
+        self._log("Parameters changed that require a manual run. Click 'Run / Update' to apply.")
         self.btn_run.setStyleSheet(self._manual_dirty_style)
 
-    # Run pipeline 
+    # ---------- Existing pipeline run ----------
     def _on_run_clicked(self):
         self._run_partition_async()
 
     def on_params_finalized(self):
-        """
-        Called once after sliders stop moving (debounced).
-        Only runs if we've done at least one manual run, there are no pending
-        manual-only changes, and no run is currently in progress.
-        """
         if not self._has_ever_run:
             return
         if self._pending_manual:
@@ -341,13 +438,11 @@ class MainWindow(QMainWindow):
             return
         self._run_partition_async()
 
-
     def _run_partition_async(self):
         if self._running:
             self._log("[Skip] A run is already in progress.")
             return
 
-        # Apply all manual changes when user clicks Run
         self._pending_manual = False
         self.btn_run.setStyleSheet("")
 
@@ -374,7 +469,6 @@ class MainWindow(QMainWindow):
         self._thread.start()
 
     def _on_finished_thread(self, payload: dict):
-        """Handle thread completion: update cache, load map, update stats."""
         html = payload['html']
         stats = payload['stats']
         key = payload['cache_key']
@@ -382,7 +476,7 @@ class MainWindow(QMainWindow):
         # Cache results
         self._map_cache[key] = {'html': html, 'stats': stats}
 
-        # Display map and stats
+        # Display
         self._load_html(html)
         self._update_stats_panel(stats)
 
@@ -394,9 +488,8 @@ class MainWindow(QMainWindow):
         self._has_ever_run = True
         self._log("Done.")
 
-    #  Parameter collection 
+    # ---------- Param collection ----------
     def _gather_params(self) -> dict:
-        """Collect current parameters from the UI."""
         return dict(
             place=self.edit_place.text().strip(),
             dist=int(self.spin_dist.value()),
@@ -408,15 +501,13 @@ class MainWindow(QMainWindow):
             lane_ver=self.cmb_lane_ver.currentText().strip() or "v1",
         )
 
-    #  Utility methods
+    # ---------- Utilities ----------
     def _load_html(self, html_path: str):
-        """Load the generated HTML map into the web view."""
         abs_path = os.path.abspath(html_path)
         self._log(f"[View] {abs_path}")
         self.web.setUrl(QUrl.fromLocalFile(abs_path))
 
     def _open_dir(self, path: str):
-        """Open the output directory in the OS file browser."""
         try:
             if sys.platform.startswith("win"):
                 os.startfile(path)
@@ -428,18 +519,15 @@ class MainWindow(QMainWindow):
             self._on_error(str(e))
 
     def _log(self, msg: str):
-        """Append a message to the run log."""
         self.txt.append(msg)
         self.txt.verticalScrollBar().setValue(self.txt.verticalScrollBar().maximum())
 
     def _on_error(self, msg: str):
-        """Handle errors: log and re-enable Run button."""
         self._log(f"[ERROR] {msg}")
         self.btn_run.setEnabled(True)
         self._running = False
 
     def _update_stats_panel(self, s: dict):
-        """Update the statistics panel with current partitioning results."""
         def fnum(x):
             try:
                 if isinstance(x, int) or float(x).is_integer():

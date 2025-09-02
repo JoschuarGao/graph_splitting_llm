@@ -1,8 +1,41 @@
 import os, time, re, hashlib
+import pandas as pd
 from math import atan2
 import folium
 import geopandas as gpd
 from core.config import OUTPUT_DIR, HTML_NAME_TEMPLATE  
+
+# ===== Diff 可视化工具（新增） =====
+
+def _detect_id_col(gdf):
+    """自动识别边的唯一ID列名"""
+    for c in ["eid", "edge_id", "id", "osmid"]:
+        if c in gdf.columns:
+            return c
+    raise ValueError("未找到边ID列，请在 edges_gdf 中加入 eid/edge_id/id/osmid 之一。")
+
+def _ensure_eid(gdf):
+    """确保 GeoDataFrame 中有 'eid' 列，如果没有就自动生成"""
+    if "eid" in gdf.columns:
+        return gdf
+    gdf = gdf.copy()
+    if "edge_id" in gdf.columns:
+        gdf["eid"] = gdf["edge_id"].astype(str)
+    elif "id" in gdf.columns:
+        gdf["eid"] = gdf["id"].astype(str)
+    elif "osmid" in gdf.columns:
+        gdf["eid"] = gdf["osmid"].astype(str)
+    else:
+        # 如果没有任何 ID 信息，就用索引来生成
+        gdf["eid"] = gdf.index.astype(str)
+    return gdf
+
+
+def _subset_by_ids(gdf, id_col, id_list):
+    if not id_list:
+        return gdf.iloc[0:0].copy()  # 空集
+    ids = set(id_list)
+    return gdf[gdf[id_col].isin(ids)].copy()
 
 # Extended statistics: include total_weight / cut_edge_weight_sum / weight_ratio
 def compute_cut_stats(edges_gdf: gpd.GeoDataFrame) -> dict:
@@ -42,10 +75,10 @@ def compute_cut_stats(edges_gdf: gpd.GeoDataFrame) -> dict:
         if hasattr(w, "astype"):  # Series
             w = w.astype(float)
         else:  # Scalar value
-            w = gpd.pd.Series([float(w)] * len(edges_gdf), index=edges_gdf.index)
+            w = pd.Series([float(w)] * len(edges_gdf), index=edges_gdf.index)
     except Exception:
         # If conversion fails, fallback to all 1.0
-        w = gpd.pd.Series([1.0] * len(edges_gdf), index=edges_gdf.index)
+        w = pd.Series([1.0] * len(edges_gdf), index=edges_gdf.index)
 
     total = int(len(edges_gdf))
     cut_count = int(is_cut.sum())
@@ -67,7 +100,12 @@ def compute_cut_stats(edges_gdf: gpd.GeoDataFrame) -> dict:
 def make_map(nodes_gdf: gpd.GeoDataFrame,
              edges_gdf: gpd.GeoDataFrame,
              place: str,
-             k: int) -> str:
+             k: int,
+             edges_gdf_old: gpd.GeoDataFrame | None = None,
+             diff: dict | None = None,
+             show_updates_default: bool = False  
+             ) -> str:
+
     """
     Create an interactive Folium map to visualize partitioned road networks.
 
@@ -203,6 +241,65 @@ def make_map(nodes_gdf: gpd.GeoDataFrame,
             m.fit_bounds([[miny, minx], [maxy, maxx]])
     except Exception:
         pass
+
+    
+    if diff is not None:
+        # 先确保新旧GDF都带有 'eid'（容错：若无则自动生成）
+        edges_gdf = _ensure_eid(edges_gdf)
+        if edges_gdf_old is not None:
+            edges_gdf_old = _ensure_eid(edges_gdf_old)
+
+        try:
+            id_col_new = _detect_id_col(edges_gdf)
+        except Exception:
+            id_col_new = None
+
+        # Added / Changed 从 “新图” 里取几何
+        if id_col_new is not None:
+            added_gdf   = _subset_by_ids(edges_gdf, id_col_new, diff.get("added", []))
+            changed_gdf = _subset_by_ids(edges_gdf, id_col_new, diff.get("changed", []))
+        else:
+            added_gdf   = edges_gdf.iloc[0:0].copy()
+            changed_gdf = edges_gdf.iloc[0:0].copy()
+
+        # Removed 从 “旧图” 里取几何
+        removed_gdf = None
+        id_col_old = None
+        if edges_gdf_old is not None:
+            try:
+                id_col_old = _detect_id_col(edges_gdf_old)
+                removed_gdf = _subset_by_ids(edges_gdf_old, id_col_old, diff.get("removed", []))
+                removed_gdf = to_wgs84(removed_gdf)
+            except Exception:
+                removed_gdf = None
+
+        # 三层样式：新增=粗线；修改=中等；删除=虚线
+        if added_gdf is not None and len(added_gdf):
+            added_gdf.explore(
+                m=m,
+                name="Updates: Added edges",
+                tooltip=[c for c in ["highway", "length", "part_u", "part_v", id_col_new] if c and c in added_gdf.columns],
+                style_kwds=dict(weight=4.0, opacity=0.95),
+                show=show_updates_default  
+            )
+        if changed_gdf is not None and len(changed_gdf):
+            changed_gdf.explore(
+                m=m,
+                name="Updates: Changed edges",
+                tooltip=[c for c in ["highway", "length", "part_u", "part_v", id_col_new] if c and c in changed_gdf.columns],
+                style_kwds=dict(weight=3.0, opacity=0.95),
+                show=show_updates_default  
+            )
+        if removed_gdf is not None and len(removed_gdf):
+            removed_gdf.explore(
+                m=m,
+                name="Updates: Removed edges",
+                tooltip=[c for c in ["highway", "length", "part_u", "part_v", id_col_old] if c and c in removed_gdf.columns],
+                color="#000000",
+                style_kwds=dict(weight=3.0, opacity=0.95, dashArray="6,6"),
+                show=show_updates_default 
+            )
+
 
     folium.LayerControl(collapsed=False).add_to(m)
 

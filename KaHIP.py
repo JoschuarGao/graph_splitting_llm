@@ -144,8 +144,9 @@ def generate_csv_path(base_dir=None):
 
 def save_result_to_csv(place, version, k, dist, cut_count, cut_weight, total_weight,
                        csv_path, lane_weight_version=None,
-                       alpha=1.0, beta=1.0, gamma=0.1,
+                       alpha=1.0, beta=1.0, gamma=0.1, seed = 0,
                        png_path=None, json_path=None, run_seconds=None):
+
     """
     Append partition results to a CSV file, creating headers if file does not exist.
     Writes weighted cut ratio only (cut_edge_weight_sum / total_weight).
@@ -166,6 +167,7 @@ def save_result_to_csv(place, version, k, dist, cut_count, cut_weight, total_wei
         "alpha": float(alpha),
         "beta": float(beta),
         "gamma": float(gamma),
+        "seed": int(seed),
         "cut_ratio": float(cut_ratio),
         "png_path": png_path or "",
         "json_path": json_path or "",
@@ -175,7 +177,7 @@ def save_result_to_csv(place, version, k, dist, cut_count, cut_weight, total_wei
     fieldnames = [
         "ts", "place", "dist", "weight_version", "lane_weight_version", "k",
         "cut_edge_count", "cut_edge_weight_sum", "total_weight",
-        "alpha", "beta", "gamma",
+        "alpha", "beta", "gamma","seed",
         "cut_ratio", "png_path", "json_path", "run_seconds"
     ]
 
@@ -185,6 +187,73 @@ def save_result_to_csv(place, version, k, dist, cut_count, cut_weight, total_wei
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
+# ---- minimal exporter for diff_merge.py ----
+def _norm_osmid(val):
+    if isinstance(val, (list, tuple, set)):
+        return "osmid:" + "_".join(map(str, list(val)))
+    return "osmid:" + str(val)
+
+def export_graph_json_for_merge(G, node_to_partition, out_json_path):
+    """
+    导出成 diff_merge.py 需要的格式：
+    {
+      "nodes": {nid: {"x":..., "y":...}, ...},
+      "edges": {eid: {"u":..., "v":..., "geom":[[x,y],...], "partition":int|None,
+                      "type":..., "lanes":..., "length":..., "cut":bool, "eid":eid}, ...}
+    }
+    """
+    import json
+    # 1) nodes
+    N = {}
+    for n, d in G.nodes(data=True):
+        if "x" in d and "y" in d:
+            N[str(n)] = {"x": float(d["x"]), "y": float(d["y"])}
+        else:
+            N[str(n)] = {"x": None, "y": None}
+
+    # 2) edges
+    E = {}
+    for i, (u, v, data) in enumerate(G.edges(data=True)):
+        # eid：优先 osmid，否则用 u-v-序号
+        if "osmid" in data:
+            eid = _norm_osmid(data["osmid"])
+        else:
+            eid = f"e:{u}-{v}-{i}"
+
+        # 端点坐标
+        ux, uy = G.nodes[u].get("x"), G.nodes[u].get("y")
+        vx, vy = G.nodes[v].get("x"), G.nodes[v].get("y")
+
+        # 几何：有 shapely geometry 就用它；否则用直线
+        if "geometry" in data and data["geometry"] is not None:
+            try:
+                coords = [(float(x), float(y)) for (x, y) in data["geometry"].coords]
+            except Exception:
+                coords = [(float(ux), float(uy)), (float(vx), float(vy))]
+        else:
+            coords = [(float(ux), float(uy)), (float(vx), float(vy))]
+
+        pu = node_to_partition.get(u)
+        pv = node_to_partition.get(v)
+        cut = (pu is not None and pv is not None and pu != pv)
+        part = int(pu) if (pu is not None and pv is not None and pu == pv) else None
+
+        E[str(eid)] = {
+            "u": str(u), "v": str(v),
+            "geom": coords,
+            "partition": part,
+            "type": (data.get("highway") if not isinstance(data.get("highway"), (list, tuple)) else data.get("highway", ["unclassified"])[0]),
+            "lanes": data.get("lanes"),
+            "length": float(data.get("length", 0.0)) if data.get("length") is not None else 0.0,
+            "cut": bool(cut),
+            "eid": str(eid)
+        }
+
+    out = {"nodes": N, "edges": E}
+    os.makedirs(os.path.dirname(out_json_path), exist_ok=True)
+    with open(out_json_path, "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False, indent=2)
+    return out_json_path
 
 
 
@@ -252,9 +321,12 @@ def plot_edge_weights(G, save_path=None, title="Edge Weight Visualization"):
         plt.show()
 
 
-def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='./cached_maps', csv_path="results.csv",
-                  lane_weight_config=None, lane_weight_version=None, alpha=1.0, beta=1.0, gamma=0.1,
-                  road_types=None, output_dir=None):
+def process_place(
+    place, road_type_weights, version, k=3, dist=5000, cache_dir='./cached_maps', csv_path="results.csv",
+    lane_weight_config=None, lane_weight_version=None,
+    alpha=1.0, beta=1.0, gamma=0.1, seed=0,  
+    road_types=None, output_dir=None):
+
     """
     Main function for processing a place:
     - Load or download road network
@@ -488,12 +560,26 @@ def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='
         csv_path=csv_path,
         lane_weight_version=lane_weight_version,
         alpha=alpha, beta=beta, gamma=gamma,
+        seed=seed,
         png_path=save_path,
         json_path=json_path,
         run_seconds=run_seconds
     )
     print(f"CSV_PATH={os.path.abspath(csv_path)}")
     print(f"RUNTIME_SECONDS={run_seconds:.2f}")
+    
+    run_tag = f"run{run_index:04d}"
+    merged_json_path = os.path.join(date_dir, f"graph_for_merge_k{k}_{run_tag}.json")
+    export_graph_json_for_merge(G, node_to_partition, merged_json_path)
+    print(f"RUN_TAG={run_tag}")
+    print(f"MERGE_JSON={merged_json_path}")
+    return {
+    "merge_json": merged_json_path,   # 给 diff_merge 用
+    "date_dir": date_dir,
+    "run_tag": run_tag,
+    "png_path": save_path,
+    "edges_json_path": json_path      # 你已有的 edges_partitions_k{k}.json（统计用）
+    }
 
 
     
@@ -512,6 +598,7 @@ if __name__ == "__main__":
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--gamma", type=float, default=0.1)
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--csv_path", type=str, default="~/thesis/min_balanced_cut/unified/doe_results.csv")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Override result base directory (default uses RESULT_BASE or ./result).")
@@ -546,6 +633,7 @@ if __name__ == "__main__":
         alpha=args.alpha,
         beta=args.beta,
         gamma=args.gamma,
+        seed=args.seed,
         road_types=args.road_types,
         output_dir=args.output_dir,
     )

@@ -12,6 +12,7 @@ import csv
 import matplotlib as mpl
 from matplotlib import cm
 import matplotlib.colors as mcolors
+from core.osm_loader import load_graph
 from collections import defaultdict
 from shapely.geometry import LineString
 from datetime import datetime
@@ -189,9 +190,15 @@ def save_result_to_csv(place, version, k, dist, cut_count, cut_weight, total_wei
         writer.writerow(row)
 # ---- minimal exporter for diff_merge.py ----
 def _norm_osmid(val):
+    # osmid 可能是标量、list、tuple、set；我们统一排序后再拼接，避免不同运行顺序不同导致 diff 对不上
     if isinstance(val, (list, tuple, set)):
-        return "osmid:" + "_".join(map(str, list(val)))
+        try:
+            items = sorted(list(val))
+        except Exception:
+            items = sorted([str(x) for x in list(val)])
+        return "osmid:" + "_".join(map(str, items))
     return "osmid:" + str(val)
+
 
 def export_graph_json_for_merge(G, node_to_partition, out_json_path):
     """
@@ -334,21 +341,15 @@ def process_place(
     - Partition the graph using KaMinPar
     - Visualize and save results
     """
-    safe_name = place.replace(",", "").replace(" ", "_")
-    os.makedirs(cache_dir, exist_ok=True)
-    cache_key = f"{safe_name}_d{int(dist)}"
-    cache_path = os.path.join(cache_dir, f"{cache_key}.graphml")
     t0 = time.time()  # runtime
+    safe_name = place.replace(",", "").replace(" ", "_")
+    dist = int(dist)  # 保证是 int，传给 load_graph
 
-    # Load cached graph or download from OSM
-    if os.path.exists(cache_path):
-        G_original = ox.load_graphml(cache_path)
-    else:
-        try:
-            G_original = ox.graph_from_place(place, network_type="drive")
-        except Exception:
-            G_original = ox.graph_from_address(place, dist=dist, network_type="drive")
-        ox.save_graphml(G_original, cache_path)
+
+    #  统一用项目封装的加载器；它会正确使用 dist，并自己处理缓存
+    G_original = load_graph(place, dist=int(dist))
+    
+
 
 
     try:
@@ -586,6 +587,7 @@ def process_place(
 
 
 if __name__ == "__main__":
+    import traceback, sys
     parser = argparse.ArgumentParser(description="Graph Partitioning for a City Road Network")
     parser.add_argument("--place", type=str, required=True)
     parser.add_argument("--k", type=int, default=3)
@@ -605,36 +607,40 @@ if __name__ == "__main__":
     parser.add_argument("--road_types", type=str, default=None,
                         help="Comma-separated OSM 'highway' types to include (e.g. 'motorway,primary,secondary').")
 
-    args = parser.parse_args()
+    try:
+        args = parser.parse_args()
 
-    # Expand and resolve CSV path
-    csv_path = os.path.expanduser(args.csv_path)
-    if not os.path.isabs(csv_path):
-        base_dir = os.path.abspath(os.path.expanduser(
-            os.environ.get("RESULT_BASE") or
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "result")
-        ))
-        os.makedirs(base_dir, exist_ok=True)
-        csv_path = os.path.join(base_dir, csv_path)
+        # 解析并归一化 CSV 路径
+        csv_path = os.path.expanduser(args.csv_path)
+        if not os.path.isabs(csv_path):
+            base_dir = os.path.abspath(os.path.expanduser(
+                os.environ.get("RESULT_BASE") or
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "result")
+            ))
+            os.makedirs(base_dir, exist_ok=True)
+            csv_path = os.path.join(base_dir, csv_path)
 
-    road_type_weights = load_weights(args.road_type_version, args.road_type_path)
-    lane_weight_config = load_lane_weights(args.lane_weight_version, args.lane_weight_path)
+        road_type_weights = load_weights(args.road_type_version, args.road_type_path)
+        lane_weight_config = load_lane_weights(args.lane_weight_version, args.lane_weight_path)
 
-    process_place(
-        place=args.place,
-        road_type_weights=road_type_weights,
-        version=args.road_type_version,
-        k=args.k,
-        dist=args.dist,
-        cache_dir=args.cache_dir,
-        csv_path=csv_path,
-        lane_weight_config=lane_weight_config,
-        lane_weight_version=args.lane_weight_version,
-        alpha=args.alpha,
-        beta=args.beta,
-        gamma=args.gamma,
-        seed=args.seed,
-        road_types=args.road_types,
-        output_dir=args.output_dir,
-    )
-
+        process_place(
+            place=args.place,
+            road_type_weights=road_type_weights,
+            version=args.road_type_version,
+            k=args.k,
+            dist=int(args.dist),          # 确保传 int
+            cache_dir=args.cache_dir,
+            csv_path=csv_path,
+            lane_weight_config=lane_weight_config,
+            lane_weight_version=args.lane_weight_version,
+            alpha=args.alpha,
+            beta=args.beta,
+            gamma=args.gamma,
+            seed=args.seed,
+            road_types=args.road_types,
+            output_dir=args.output_dir,
+        )
+    except Exception as e:
+        # 打印完整堆栈到 stdout（GUI 已把 stderr 合并到 stdout）
+        traceback.print_exc()
+        sys.exit(1)

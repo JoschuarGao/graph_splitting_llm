@@ -35,7 +35,6 @@ def parse_from_json(G: nx.Graph, data: Dict[str, Any]) -> Tuple[gpd.GeoDataFrame
     """
     # Convert graph to GeoDataFrames (nodes and edges)
     nodes_gdf, edges_gdf = ox.graph_to_gdfs(G)
-
     # Ensure that "edges" key exists in the JSON data
     if "edges" not in data:
         raise ValueError("JSON is missing the 'edges' field.")

@@ -13,8 +13,6 @@ import matplotlib as mpl
 from matplotlib import cm
 import matplotlib.colors as mcolors
 from core.osm_loader import load_graph
-from collections import defaultdict
-from shapely.geometry import LineString
 from datetime import datetime
 from pyproj import Transformer
 
@@ -374,35 +372,55 @@ def process_place(
     if G.number_of_edges() == 0:
         raise ValueError("No edges left after filtering by road_types. Try selecting more highway types.")
 
-    # Assign edge weights
+   
+
+
+    # ---------------- Assign edge weights ----------------
+    # 1) 长度因子：单调递减，300–700 m 更敏感，>1500 m 近似平
+    m = 500.0   # 中心点
+    r = 150.0   # 斜率控制
+    def f_len(length_m: float) -> float:
+         # 范围严格在 [0.1, 10.0]；若不介意短边略高，可把 9.9 改为 10.0
+        return 0.1 + 10 / (1.0 + math.exp((length_m - m) / r))
+
+    # 2) 全局预算缩放：避免大量边撞上限（cap = 20）
+    T_MAX = 10.0   # road_type 最大
+    L_MAX = 8.0    # lane 最大（按你的配置）
+    F_MAX = 10.0   # f_len 最大
+    denom = alpha * T_MAX + beta * L_MAX + gamma * F_MAX
+    S = 1.0 if denom <= 20.0 else (20.0 / denom)
+
+    # 3) 单层循环：逐边赋权
     for u, v, data in G.edges(data=True):
+        # road type 基线
         highway = data.get("highway", "unclassified")
         if isinstance(highway, list):
             highway = highway[0]
-        base_weight = road_type_weights.get(highway, road_type_weights.get("default", 1))
+        base_weight = road_type_weights.get(highway, road_type_weights.get("default", 1.0))
 
-        # Get lane count
+        # lane 因子
         lanes = data.get("lanes")
         try:
             lane_count = int(lanes) if lanes else 1
-        except:
+        except Exception:
             lane_count = 1
-
         if lane_weight_config:
             lane_factor = lane_weight_config.get(str(lane_count), lane_weight_config.get("default", 1.0))
         else:
-            lane_factor = 1
+            lane_factor = 1.0
+
+        # length 因子
+        length = float(data.get("length", 1.0))
+        length_factor = f_len(length)
+
+        # 线性组合 -> 全局缩放 -> 轻度截断到 [0.1, 20.0]
+        w_raw = alpha * base_weight + beta * lane_factor + gamma * length_factor
+        w_scaled = S * w_raw
+        data["weight"] = max(0.1, min(w_scaled, 20.0))
+    # -----------------------------------------------------
 
 
-        # Get road length
-        length = data.get("length", 1)
-        # Use a smoothed factor for length
-        length_factor = max(0.1, 1/math.exp((length-500)/100) + 1)
 
-        # Scale weights with alpha, beta, gamma
-        scaled_weight = math.log1p(length_factor)
-        edge_weight = alpha * base_weight + beta * lane_factor + gamma * scaled_weight
-        data["weight"] = max(0.2, min(edge_weight, 10))
 
     SCALE = 1000
     for u, v, data in G.edges(data=True):
@@ -466,25 +484,6 @@ def process_place(
         f"Cut Ratio: {cut_ratio:.2%}",
         transform=ax.transAxes, fontsize=14, ha='left', va='top', color="black",
         bbox=dict(facecolor='white', edgecolor='black', boxstyle='round,pad=0.3'))
-
-    # Draw dashed lines between partitions for cut edges
-    midpoints_by_region_pair = defaultdict(list)
-    for u_xy, v_xy, pu, pv in cut_edges:
-        midpoint = ((u_xy[0] + v_xy[0]) / 2, (u_xy[1] + v_xy[1]) / 2)
-        key = tuple(sorted((pu, pv)))
-        midpoints_by_region_pair[key].append(midpoint)
-
-    for (p1, p2), points in midpoints_by_region_pair.items():
-        if len(points) < 2:
-            continue
-        points_sorted = sorted(points, key=lambda p: (p[0], p[1]))
-        line = LineString(points_sorted)
-        color_idx = p1 * k + p2
-        line_color = cmap((color_idx % 20) / 20)
-        x, y = line.xy
-        ax.plot(x, y, color=line_color, linewidth=3, alpha=0.9, linestyle='--', label=f"{p1}-{p2}")
-
-    plt.legend()
 
     # Save main figure
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -583,7 +582,24 @@ def process_place(
     }
 
 
-    
+# Debug
+import sys, os
+def _inject_debug_defaults():
+    # 仅当无任何参数时注入（避免覆盖你手动传参）
+    if len(sys.argv) == 1:
+        sys.argv += [
+            "--place", "Karlsruhe, Germany",
+            "--k", "18",
+            "--dist", "3000",
+            "--road_type_version", "all_1",
+            "--lane_weight_version", "all_1",
+            "--alpha", "1.0", "--beta", "1.0", "--gamma", "1.0",
+            "--csv_path", os.path.expanduser("~/thesis/min_balanced_cut/unified/doe_results.csv"),
+            "--output_dir", os.path.expanduser("~/thesis/min_balanced_cut/result")
+        ]
+
+_inject_debug_defaults()
+
 
 
 if __name__ == "__main__":

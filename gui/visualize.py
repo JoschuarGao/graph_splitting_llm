@@ -5,10 +5,7 @@ from typing import Optional, Dict, Iterable, Tuple, Any, List
 
 import folium
 import geopandas as gpd
-import numpy as np
 import pandas as pd
-from shapely.geometry import LineString
-from math import atan2
 
 # 允许在 core/config.py 中自定义输出目录与文件名模板
 try:
@@ -61,27 +58,19 @@ def _detect_id_col(gdf: gpd.GeoDataFrame) -> str:
     return "eid"
 
 
-# ---- 放在文件顶部工具区：替换你现有的 _normalize_diff ----
 def _normalize_diff(diff: Optional[Dict]) -> Dict[str, list]:
     """
-    兼容各种 diff 结构：
-    - {"added":[...], "changed":[...], "removed":[...]}
-    - {"added":{"edges":[...]},"removed":{"edges":[...]}}
-    - 键名可能是 added_edges/removed_edges/modified/new/deleted 等
-    统一返回 {"added":[str], "changed":[str], "removed":[str]}
+    兼容各种 diff 结构，统一返回 {"added":[str], "changed":[str], "removed":[str]}
     """
     def _pull(section):
         if section is None:
             return []
-        # 直接是列表
         if isinstance(section, (list, tuple, set)):
             return list(section)
-        # 可能是 dict，取常见字段
         if isinstance(section, dict):
             for key in ("edges", "edge_ids", "ids", "list"):
                 if key in section and isinstance(section[key], (list, tuple, set)):
                     return list(section[key])
-        # 其它类型直接丢弃
         return []
 
     if not diff:
@@ -91,13 +80,11 @@ def _normalize_diff(diff: Optional[Dict]) -> Dict[str, list]:
     changed = _pull(diff.get("changed") or diff.get("modified") or diff.get("changed_edges"))
     removed = _pull(diff.get("removed") or diff.get("deleted")  or diff.get("removed_edges"))
 
-    # 统一转为字符串，方便与 GDF 的 eid 匹配
     return {
         "added":   [str(x) for x in added],
         "changed": [str(x) for x in changed],
         "removed": [str(x) for x in removed],
     }
-
 
 
 def _subset_by_ids(gdf: gpd.GeoDataFrame, id_col: str, ids: Iterable[str]) -> gpd.GeoDataFrame:
@@ -106,19 +93,6 @@ def _subset_by_ids(gdf: gpd.GeoDataFrame, id_col: str, ids: Iterable[str]) -> gp
         return gdf.iloc[0:0].copy()
     s = set(map(str, ids))
     return gdf[gdf[id_col].astype(str).isin(s)].copy()
-
-
-def _edge_mid_xy(geom) -> Optional[Tuple[float, float]]:
-    """获取线段中点（lon, lat）。"""
-    try:
-        pt = geom.interpolate(0.5, normalized=True)
-        return (pt.x, pt.y)
-    except Exception:
-        try:
-            coords = list(geom.coords)
-            return ((coords[0][0] + coords[-1][0]) / 2.0, (coords[0][1] + coords[-1][1]) / 2.0)
-        except Exception:
-            return None
 
 
 def _tooltip_cols(gdf: gpd.GeoDataFrame, candidates: Iterable[str]) -> List[str]:
@@ -248,18 +222,15 @@ def make_map(
     # 将任意类型分区标签 factorize 成整数标签；NaN -> -1
     codes, _ = pd.factorize(label_series, sort=True)
     internal_edges["_part_code"] = codes
-    # 明确 categories：去掉 -1，转 list，避免 numpy 数组在 if 中引发歧义
     cats = [int(c) for c in pd.unique(codes) if int(c) != -1]
-    cats = sorted(cats)
-    if len(cats) == 0:
-        cats = [0]
+    cats = sorted(cats) if len(cats) > 0 else [0]
 
     # Internal edges layer — 离散着色
     if len(internal_edges) > 0:
         m = internal_edges.explore(
             column="_part_code",
-            categorical=True,                # 离散上色
-            categories=cats,                 # 显式提供类别
+            categorical=True,
+            categories=cats,
             cmap="tab20",
             tiles="cartodbpositron",
             tooltip=_tooltip_cols(internal_edges, ["highway", "length", "part_u", "part_v", "partition"]),
@@ -269,9 +240,8 @@ def make_map(
     else:
         m = folium.Map(tiles="cartodbpositron", zoom_start=12)
 
-    # 切割边层
+    # 切割边层（仅画边，不画中点或连线）
     if len(cut_edges) > 0:
-        # 先加切割边可视
         cut_edges.explore(
             m=m,
             color="#111111",
@@ -279,44 +249,6 @@ def make_map(
             name="Cut edges",
             tooltip=_tooltip_cols(cut_edges, ["highway", "length", "part_u", "part_v"])
         )
-
-        # 画分区对的示意线（仅当 part_u/part_v 都非空）
-        mask_valid_cut = cut_edges["part_u"].notna() & cut_edges["part_v"].notna()
-        ce = cut_edges[mask_valid_cut].copy()
-        if len(ce) > 0:
-            def _pair(row):
-                pu, pv = row["part_u"], row["part_v"]
-                try:
-                    return tuple(sorted((int(pu), int(pv))))
-                except Exception:
-                    if (pu is None) or (pv is None):
-                        return None
-                    try:
-                        return tuple(sorted((pu, pv)))
-                    except Exception:
-                        return None
-
-            ce["pair"] = ce.apply(_pair, axis=1)
-            ce = ce[ce["pair"].notna()]
-            ce["midxy"] = ce.geometry.apply(_edge_mid_xy)
-            ce = ce[ce["midxy"].notna()]
-
-            for _, g in ce.groupby("pair"):
-                if len(g) < 2:
-                    continue
-                xs = [xy[0] for xy in g["midxy"]]
-                ys = [xy[1] for xy in g["midxy"]]
-                cx, cy = (sum(xs) / len(xs), sum(ys) / len(ys))
-                ordered = sorted(g["midxy"].tolist(), key=lambda xy: atan2(xy[1] - cy, xy[0] - cx))
-                # folium 需要 (lat, lon)
-                locations = [(lat, lon) for (lon, lat) in ordered]
-                folium.PolyLine(
-                    locations=locations,
-                    color="#000000",
-                    weight=2.0,
-                    opacity=0.9,
-                    dash_array="2,6"
-                ).add_to(m)
 
     # 节点层（抽样避免过密）
     if nodes_gdf is not None and len(nodes_gdf) > 0:
@@ -349,7 +281,6 @@ def make_map(
         pass
 
     # ---------- 差异覆盖层 ----------
-        # ---------- 差异覆盖层 ----------
     if diff is not None:
         diff = _normalize_diff(diff)
 
@@ -366,7 +297,7 @@ def make_map(
             removed_gdf = _subset_by_ids(old_df, id_old, diff["removed"])
             removed_gdf = _to_wgs84(removed_gdf)
 
-        # 为了让你“一眼看见”，名字里带数量；颜色粗细也更醒目
+        # 为了直观显示，名字里带数量；颜色、粗细更醒目
         if added_gdf is not None and len(added_gdf) > 0:
             added_gdf.explore(
                 m=m,
@@ -396,7 +327,6 @@ def make_map(
                 tooltip=[c for c in ("highway", "length", "part_u", "part_v") if c in removed_gdf.columns],
                 show=show_updates_default
             )
-
 
     folium.LayerControl(collapsed=False).add_to(m)
     return _save_map(m, place, k)

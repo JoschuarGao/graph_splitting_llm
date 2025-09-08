@@ -76,6 +76,68 @@ class PipelineThread(QThread):
             # 3) Parse results and compute statistics
             data = read_kahip_json(json_path)
             nodes_gdf, edges_gdf = parse_from_json(G, data)
+
+            # --- normalize list-typed attributes (minimal) ---
+            if "osmid" in edges_gdf.columns:
+                edges_gdf["osmid"] = edges_gdf["osmid"].apply(
+                    lambda x: tuple(x) if isinstance(x, list) else x
+                )
+            # --- ensure key column exists and types are scalar ints ---
+            if "key" not in edges_gdf.columns:
+                edges_gdf["key"] = edges_gdf["edge_key"] if "edge_key" in edges_gdf.columns else 0
+            for c in ("u", "v", "key"):
+                edges_gdf[c] = edges_gdf[c].apply(lambda x: x[0] if isinstance(x, list) and len(x) > 0 else x)
+                edges_gdf[c] = edges_gdf[c].astype("int64", errors="ignore")
+
+            # 用 MultiIndex 做边索引，避免 “cannot insert key, already exists”
+            edges_gdf = edges_gdf.set_index(["u", "v", "key"], drop=True)
+
+            # 可选：安全检查
+            # assert not edges_gdf.applymap(lambda x: isinstance(x, list)).any().any(), "still has list cells"
+
+            # ==== DIAGNOSTICS: find which columns contain list values (unhashable) ====
+            import pandas as pd
+
+            def _col_has_list(s: pd.Series) -> bool:
+                try:
+                    return bool(s.apply(lambda x: isinstance(x, list)).any())
+                except Exception:
+                    return False
+
+            suspects = []
+            for col in ["u", "v", "key", "edge_key", "eid", "osmid"]:
+                if col in edges_gdf.columns and _col_has_list(edges_gdf[col]):
+                    suspects.append(col)
+
+            print("[CHK] list-like columns:", suspects)
+
+            # Print sample rows that actually contain lists (up to 5)
+            for col in suspects:
+                bad = edges_gdf[edges_gdf[col].apply(lambda x: isinstance(x, list))]
+                print(f"[SAMPLE] {col} has list -> rows={len(bad)}")
+                try:
+                    print(bad[[col]].head(5))
+                except Exception:
+                    print(bad.head(5))
+
+            # Table-wide scan to reveal any cell that is a list (sample positions)
+            mask_any_list = edges_gdf.applymap(lambda x: isinstance(x, list))
+            if mask_any_list.any().any():
+                positions = []
+                for r, c in zip(*mask_any_list.values.nonzero()):
+                    positions.append((edges_gdf.index[r], edges_gdf.columns[c]))
+                    if len(positions) >= 5:
+                        break
+                print("[CHK] any list cells (sample up to 5):", positions)
+
+            print("[DBG] index type:", type(edges_gdf.index).__name__,
+                "nlevels:", getattr(edges_gdf.index, "nlevels", 1))
+            print("[DBG] dtypes:", edges_gdf.dtypes.to_dict())
+            # ==== END DIAGNOSTICS ====
+
+
+
+
             print(edges_gdf.columns)
             import osmnx as ox
             G_updated = ox.graph_from_gdfs(nodes_gdf,edges_gdf)
@@ -418,7 +480,6 @@ class MainWindow(QMainWindow):
             r_hops_local=2
         )
 
-            # 规范化一次键名，避免不同返回结构
         def _normalize_diff(d):
             if not isinstance(d, dict):
                 return {"added": [], "changed": [], "removed": []}

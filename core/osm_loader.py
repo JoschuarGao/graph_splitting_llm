@@ -1,47 +1,43 @@
 # core/osm_loader.py
 import os
-import json
-import hashlib
 import osmnx as ox
 import networkx as nx
+from pathlib import Path
+from core.config import CACHE_DIR  # 确保在 config 里定义了缓存目录
 
-CACHE_DIR = os.path.join(os.path.dirname(__file__), "..", "cache")
-os.makedirs(CACHE_DIR, exist_ok=True)
+# Disable OSMnx console logging
+ox.settings.log_console = False
 
-def _safe(s: str) -> str:
-    return s.replace(",", "").replace(" ", "_")
 
-def _cache_paths(place: str, dist: int):
-    safe = _safe(place)
-    # ⛳ 关键：把 dist 放进缓存文件名里
-    base = f"{safe}_d{int(dist)}"
-    return {
-        "graphml": os.path.join(CACHE_DIR, f"{base}.graphml"),
-        "meta":    os.path.join(CACHE_DIR, f"{base}.json"),
-    }
+def _safe(name: str) -> str:
+    """将地名转为安全文件名"""
+    return name.replace(", ", "_").replace(",", "").replace(" ", "_")
 
-def load_graph(place: str, dist: int = 5000, network_type: str = "drive") -> nx.MultiDiGraph:
+
+def load_graph(place: str, dist: int = 20000) -> nx.Graph:
     """
-    下载/读取以 place 为中心、半径 dist(米) 的道路图。
-    缓存命中时直接读取缓存；缓存键包含 dist，避免“总是 5000”问题。
+    下载或从缓存加载 OSM 路网，并以无向图返回。
+    缓存文件名包含 dist，避免不同半径命中同一缓存。
     """
-    p = _cache_paths(place, dist)
-    if os.path.exists(p["graphml"]):
-        try:
-            G = ox.load_graphml(p["graphml"])
-            print(f"[OSM] cache hit -> {p['graphml']} (dist={dist})")
-            return G
-        except Exception:
-            pass  # 如损坏则重下
+    # 确保缓存目录存在
+    Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
 
-    print(f"[OSM] fetching from OSM: place='{place}', dist={dist}m ...")
-    # 你当前项目如果是基于地点+半径，推荐用 graph_from_address + dist
-    # 若是用地名 polygon，请改成 graph_from_place，并移除 dist。
-    G = ox.graph_from_address(place, dist=dist, network_type=network_type, simplify=False)
+    safe_place = _safe(place)
+    cache_path = os.path.join(CACHE_DIR, f"{safe_place}_d{dist}.graphml")  # <<< 关键
 
-    # 存缓存
-    ox.save_graphml(G, p["graphml"])
-    with open(p["meta"], "w", encoding="utf-8") as f:
-        json.dump({"place": place, "dist": dist}, f)
-    print(f"[OSM] saved cache -> {p['graphml']} (dist={dist})")
+    if os.path.exists(cache_path):
+        # 命中缓存
+        G = ox.load_graphml(cache_path)
+        # print(f"[OSM] cache hit -> {cache_path}")
+    else:
+        # 下载并缓存
+        # 你原来的构图方式保持不变
+        G = ox.graph_from_address(place, dist=dist, network_type="drive")
+        ox.save_graphml(G, cache_path)
+        # print(f"[OSM] cache saved -> {cache_path}")
+
+    # 转无向
+    if G.is_directed():
+        G = G.to_undirected()
+
     return G

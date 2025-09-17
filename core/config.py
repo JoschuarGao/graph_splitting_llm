@@ -40,8 +40,6 @@ KAHIP_CLI_ARGS = {
     "beta": "--beta",
     "gamma": "--gamma",
     "csv_path": "--csv_path",
-    "output_dir": "--output_dir", 
-    "road_types": "--road_types"
 }
 
 # Backward compatibility (if other files mistakenly use ARG_MAP)
@@ -52,4 +50,5 @@ ARG_MAP = KAHIP_CLI_ARGS
 PREFERRED_OUTPUT = ["json", "csv"]
 
 # Template for HTML map output file name
-HTML_NAME_TEMPLATE = "partition_{safe_place}_k{k}.html"
+HTML_NAME_TEMPLATE = "partition_{safe_place}_d{dist}_k{k}.html"
+

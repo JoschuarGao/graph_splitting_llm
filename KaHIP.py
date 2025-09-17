@@ -9,10 +9,13 @@ import argparse
 import kaminpar
 import json
 import csv
+import warnings
 import matplotlib as mpl
 from matplotlib import cm
+from pathlib import Path
 import matplotlib.colors as mcolors
-from core.osm_loader import load_graph
+from collections import defaultdict
+from shapely.geometry import LineString
 from datetime import datetime
 from pyproj import Transformer
 
@@ -143,9 +146,8 @@ def generate_csv_path(base_dir=None):
 
 def save_result_to_csv(place, version, k, dist, cut_count, cut_weight, total_weight,
                        csv_path, lane_weight_version=None,
-                       alpha=1.0, beta=1.0, gamma=0.1, seed = 0,
+                       alpha=1.0, beta=1.0, gamma=0.1,
                        png_path=None, json_path=None, run_seconds=None):
-
     """
     Append partition results to a CSV file, creating headers if file does not exist.
     Writes weighted cut ratio only (cut_edge_weight_sum / total_weight).
@@ -166,7 +168,6 @@ def save_result_to_csv(place, version, k, dist, cut_count, cut_weight, total_wei
         "alpha": float(alpha),
         "beta": float(beta),
         "gamma": float(gamma),
-        "seed": int(seed),
         "cut_ratio": float(cut_ratio),
         "png_path": png_path or "",
         "json_path": json_path or "",
@@ -176,7 +177,7 @@ def save_result_to_csv(place, version, k, dist, cut_count, cut_weight, total_wei
     fieldnames = [
         "ts", "place", "dist", "weight_version", "lane_weight_version", "k",
         "cut_edge_count", "cut_edge_weight_sum", "total_weight",
-        "alpha", "beta", "gamma","seed",
+        "alpha", "beta", "gamma",
         "cut_ratio", "png_path", "json_path", "run_seconds"
     ]
 
@@ -186,79 +187,6 @@ def save_result_to_csv(place, version, k, dist, cut_count, cut_weight, total_wei
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
-# ---- minimal exporter for diff_merge.py ----
-def _norm_osmid(val):
-    # osmid 可能是标量、list、tuple、set；我们统一排序后再拼接，避免不同运行顺序不同导致 diff 对不上
-    if isinstance(val, (list, tuple, set)):
-        try:
-            items = sorted(list(val))
-        except Exception:
-            items = sorted([str(x) for x in list(val)])
-        return "osmid:" + "_".join(map(str, items))
-    return "osmid:" + str(val)
-
-
-def export_graph_json_for_merge(G, node_to_partition, out_json_path):
-    """
-    导出成 diff_merge.py 需要的格式：
-    {
-      "nodes": {nid: {"x":..., "y":...}, ...},
-      "edges": {eid: {"u":..., "v":..., "geom":[[x,y],...], "partition":int|None,
-                      "type":..., "lanes":..., "length":..., "cut":bool, "eid":eid}, ...}
-    }
-    """
-    import json
-    # 1) nodes
-    N = {}
-    for n, d in G.nodes(data=True):
-        if "x" in d and "y" in d:
-            N[str(n)] = {"x": float(d["x"]), "y": float(d["y"])}
-        else:
-            N[str(n)] = {"x": None, "y": None}
-
-    # 2) edges
-    E = {}
-    for i, (u, v, data) in enumerate(G.edges(data=True)):
-        # eid：优先 osmid，否则用 u-v-序号
-        if "osmid" in data:
-            eid = _norm_osmid(data["osmid"])
-        else:
-            eid = f"e:{u}-{v}-{i}"
-
-        # 端点坐标
-        ux, uy = G.nodes[u].get("x"), G.nodes[u].get("y")
-        vx, vy = G.nodes[v].get("x"), G.nodes[v].get("y")
-
-        # 几何：有 shapely geometry 就用它；否则用直线
-        if "geometry" in data and data["geometry"] is not None:
-            try:
-                coords = [(float(x), float(y)) for (x, y) in data["geometry"].coords]
-            except Exception:
-                coords = [(float(ux), float(uy)), (float(vx), float(vy))]
-        else:
-            coords = [(float(ux), float(uy)), (float(vx), float(vy))]
-
-        pu = node_to_partition.get(u)
-        pv = node_to_partition.get(v)
-        cut = (pu is not None and pv is not None and pu != pv)
-        part = int(pu) if (pu is not None and pv is not None and pu == pv) else None
-
-        E[str(eid)] = {
-            "u": str(u), "v": str(v),
-            "geom": coords,
-            "partition": part,
-            "type": (data.get("highway") if not isinstance(data.get("highway"), (list, tuple)) else data.get("highway", ["unclassified"])[0]),
-            "lanes": data.get("lanes"),
-            "length": float(data.get("length", 0.0)) if data.get("length") is not None else 0.0,
-            "cut": bool(cut),
-            "eid": str(eid)
-        }
-
-    out = {"nodes": N, "edges": E}
-    os.makedirs(os.path.dirname(out_json_path), exist_ok=True)
-    with open(out_json_path, "w", encoding="utf-8") as f:
-        json.dump(out, f, ensure_ascii=False, indent=2)
-    return out_json_path
 
 
 
@@ -326,11 +254,11 @@ def plot_edge_weights(G, save_path=None, title="Edge Weight Visualization"):
         plt.show()
 
 
-def process_place(
-    place, road_type_weights, version, k=3, dist=5000, cache_dir='./cached_maps', csv_path="results.csv",
-    lane_weight_config=None, lane_weight_version=None,
-    alpha=1.0, beta=1.0, gamma=0.1, seed=0,  
-    road_types=None, output_dir=None):
+
+
+def process_place(place, road_type_weights, version, k=3, dist=5000, cache_dir='./cached_maps', csv_path="results.csv",
+                  lane_weight_config=None, lane_weight_version=None, alpha=1.0, beta=1.0, gamma=0.1,
+                  road_types=None, output_dir=None):
 
     """
     Main function for processing a place:
@@ -339,15 +267,18 @@ def process_place(
     - Partition the graph using KaMinPar
     - Visualize and save results
     """
-    t0 = time.time()  # runtime
     safe_name = place.replace(",", "").replace(" ", "_")
-    dist = int(dist)  # 保证是 int，传给 load_graph
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_key = f"{safe_name}_d{int(dist)}"
+    cache_path = os.path.join(cache_dir, f"{cache_key}.graphml")
+    t0 = time.time()  # runtime
 
-
-    #  统一用项目封装的加载器；它会正确使用 dist，并自己处理缓存
-    G_original = load_graph(place, dist=int(dist))
-    
-
+    # Load cached graph or download from OSM
+    if os.path.exists(cache_path):
+        G_original = ox.load_graphml(cache_path)
+    else:
+        G_original = ox.graph_from_address(place, dist=dist, network_type="drive")
+        ox.save_graphml(G_original, cache_path)
 
 
     try:
@@ -372,53 +303,55 @@ def process_place(
     if G.number_of_edges() == 0:
         raise ValueError("No edges left after filtering by road_types. Try selecting more highway types.")
 
-   
+    # Assign edge weights
+    # ---------- Assign edge weights (two-pass with global rescale) ----------
+    raw_weights = []
 
-
-    # ---------------- Assign edge weights ----------------
-    # 1) 长度因子：单调递减，300–700 m 更敏感，>1500 m 近似平
-    m = 500.0   # 中心点
-    r = 150.0   # 斜率控制
-    def f_len(length_m: float) -> float:
-         # 范围严格在 [0.1, 10.0]；若不介意短边略高，可把 9.9 改为 10.0
-        return 0.1 + 10 / (1.0 + math.exp((length_m - m) / r))
-
-    # 2) 全局预算缩放：避免大量边撞上限（cap = 20）
-    T_MAX = 10.0   # road_type 最大
-    L_MAX = 8.0    # lane 最大（按你的配置）
-    F_MAX = 10.0   # f_len 最大
-    denom = alpha * T_MAX + beta * L_MAX + gamma * F_MAX
-    S = 1.0 if denom <= 20.0 else (20.0 / denom)
-
-    # 3) 单层循环：逐边赋权
+        # pass 1: compute continuous raw weight (未整数化、未缩放)
     for u, v, data in G.edges(data=True):
-        # road type 基线
+        # 1) 道路类型
         highway = data.get("highway", "unclassified")
         if isinstance(highway, list):
             highway = highway[0]
-        base_weight = road_type_weights.get(highway, road_type_weights.get("default", 1.0))
+        base_weight = float(road_type_weights.get(highway, road_type_weights.get("default", 1.0)))
 
-        # lane 因子
+        # 2) 车道数
         lanes = data.get("lanes")
         try:
             lane_count = int(lanes) if lanes else 1
         except Exception:
             lane_count = 1
         if lane_weight_config:
-            lane_factor = lane_weight_config.get(str(lane_count), lane_weight_config.get("default", 1.0))
+            lane_factor = float(lane_weight_config.get(str(lane_count),
+                                                  lane_weight_config.get("default", 1.0)))
         else:
-            lane_factor = 1.0
+            # 没有配置时的温和线性增长
+            lane_factor = 1.0 + 0.25 * max(0, lane_count - 1)
 
-        # length 因子
-        length = float(data.get("length", 1.0))
-        length_factor = f_len(length)
+        # 3) 长度因子（你的新公式）
+        length_m = float(data.get("length", 1.0))
+        length_f = 0.1 + 10.0 / (1.0 + math.exp((length_m - 500.0) / 150.0))  # ~[0.1, 10.1]
 
-        # 线性组合 -> 全局缩放 -> 轻度截断到 [0.1, 20.0]
-        w_raw = alpha * base_weight + beta * lane_factor + gamma * length_factor
-        w_scaled = S * w_raw
-        data["weight"] = max(0.1, min(w_scaled, 20.0))
-    # -----------------------------------------------------
+        # 4) 组合 α,β,γ（注意变量名要和上面一致）
+        w_cont = (alpha * base_weight) + (beta * lane_factor) + (gamma * length_f)
 
+        # 先不截断，只存原始值，便于后面整体缩放
+        data["weight_raw"] = float(w_cont)
+        raw_weights.append(float(w_cont))
+
+    # 计算全局缩放因子：若最大值>20，则整体等比缩到20，否则不动
+    max_raw = max(raw_weights) if raw_weights else 0.0
+    scale = 20.0 / max_raw if max_raw > 20.0 else 1.0
+
+    # pass 2: 应用缩放 + 最小值保护，然后写入正式的 weight
+    for _, _, data in G.edges(data=True):
+        w_scaled = data["weight_raw"] * scale
+        # 下限保护，避免极小值；上限此时天然≤20（因为已经缩放）
+        data["weight"] = max(0.1, float(w_scaled))
+
+    # 可选：记录缩放因子，方便日志/复现实验
+    print(f"[WEIGHT] max_raw={max_raw:.4f}, scale={scale:.6f}, max_final<=20")
+    # ---------- end assign weights -----------------------------------------
 
 
 
@@ -485,6 +418,25 @@ def process_place(
         transform=ax.transAxes, fontsize=14, ha='left', va='top', color="black",
         bbox=dict(facecolor='white', edgecolor='black', boxstyle='round,pad=0.3'))
 
+    # Draw dashed lines between partitions for cut edges
+    midpoints_by_region_pair = defaultdict(list)
+    for u_xy, v_xy, pu, pv in cut_edges:
+        midpoint = ((u_xy[0] + v_xy[0]) / 2, (u_xy[1] + v_xy[1]) / 2)
+        key = tuple(sorted((pu, pv)))
+        midpoints_by_region_pair[key].append(midpoint)
+
+    for (p1, p2), points in midpoints_by_region_pair.items():
+        if len(points) < 2:
+            continue
+        points_sorted = sorted(points, key=lambda p: (p[0], p[1]))
+        line = LineString(points_sorted)
+        color_idx = p1 * k + p2
+        line_color = cmap((color_idx % 20) / 20)
+        x, y = line.xy
+        ax.plot(x, y, color=line_color, linewidth=3, alpha=0.9, linestyle='--', label=f"{p1}-{p2}")
+
+    plt.legend()
+
     # Save main figure
     today_str = datetime.now().strftime("%Y-%m-%d")
     base_dir = output_dir or os.environ.get("RESULT_BASE") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "result")
@@ -493,9 +445,10 @@ def process_place(
     date_dir = os.path.join(base_dir, safe_name, version, today_str)
     os.makedirs(date_dir, exist_ok=True)
     run_index = len([f for f in os.listdir(date_dir) if f.startswith("run") and f.endswith(".png")]) + 1
-    filename = f"run{run_index}_k{k}_a{alpha}_b{beta}_g{gamma}.png"
+    filename = f"run{run_index}_d{int(dist)}_k{k}_a{alpha}_b{beta}_g{gamma}.png"
     if lane_weight_version:
         filename = f"{lane_weight_version}_" + filename
+
     save_path = os.path.join(date_dir, filename)
     plt.savefig(save_path, dpi=300)
     plt.close(fig)
@@ -515,9 +468,11 @@ def process_place(
             "is_cut": pu != pv
         })
 
-    json_filename = f"edges_partitions_k{k}.json"
+    json_filename = f"edges_partitions_d{int(dist)}_k{k}.json"
+
     if lane_weight_version:
         json_filename = f"{lane_weight_version}_" + json_filename
+
     json_path = os.path.join(date_dir, json_filename)
     with open(json_path, "w") as f_json:
         json.dump({"edges": edge_partition_info}, f_json, indent=2)
@@ -542,13 +497,13 @@ def process_place(
         ax_sub.set_title(f"Partition {pid} for {place}", fontsize=14)
         ax_sub.set_axis_off()
 
-        part_filename = f"partition_{pid}_k{k}_run{run_index}.png"
+        part_filename = f"partition_{pid}_d{int(dist)}_k{k}_run{run_index}.png"
+
         part_save_path = os.path.join(date_dir, part_filename)
         plt.savefig(part_save_path, dpi=300)
         plt.close(fig_sub)
         print(f"Saved sub-partition figure: {part_save_path}")
 
-    # Runtime and CSV 
     # Runtime and CSV 
     run_seconds = time.time() - t0
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
@@ -560,50 +515,18 @@ def process_place(
         csv_path=csv_path,
         lane_weight_version=lane_weight_version,
         alpha=alpha, beta=beta, gamma=gamma,
-        seed=seed,
         png_path=save_path,
         json_path=json_path,
         run_seconds=run_seconds
     )
     print(f"CSV_PATH={os.path.abspath(csv_path)}")
     print(f"RUNTIME_SECONDS={run_seconds:.2f}")
+
+
     
-    run_tag = f"run{run_index:04d}"
-    merged_json_path = os.path.join(date_dir, f"graph_for_merge_k{k}_{run_tag}.json")
-    export_graph_json_for_merge(G, node_to_partition, merged_json_path)
-    print(f"RUN_TAG={run_tag}")
-    print(f"MERGE_JSON={merged_json_path}")
-    return {
-    "merge_json": merged_json_path,   # 给 diff_merge 用
-    "date_dir": date_dir,
-    "run_tag": run_tag,
-    "png_path": save_path,
-    "edges_json_path": json_path      # 你已有的 edges_partitions_k{k}.json（统计用）
-    }
-
-
-# Debug
-import sys, os
-def _inject_debug_defaults():
-    # 仅当无任何参数时注入（避免覆盖你手动传参）
-    if len(sys.argv) == 1:
-        sys.argv += [
-            "--place", "Karlsruhe, Germany",
-            "--k", "18",
-            "--dist", "3000",
-            "--road_type_version", "all_1",
-            "--lane_weight_version", "all_1",
-            "--alpha", "1.0", "--beta", "1.0", "--gamma", "1.0",
-            "--csv_path", os.path.expanduser("~/thesis/min_balanced_cut/unified/doe_results.csv"),
-            "--output_dir", os.path.expanduser("~/thesis/min_balanced_cut/result")
-        ]
-
-_inject_debug_defaults()
-
 
 
 if __name__ == "__main__":
-    import traceback, sys
     parser = argparse.ArgumentParser(description="Graph Partitioning for a City Road Network")
     parser.add_argument("--place", type=str, required=True)
     parser.add_argument("--k", type=int, default=3)
@@ -616,47 +539,44 @@ if __name__ == "__main__":
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--gamma", type=float, default=0.1)
-    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--csv_path", type=str, default="~/thesis/min_balanced_cut/unified/doe_results.csv")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Override result base directory (default uses RESULT_BASE or ./result).")
     parser.add_argument("--road_types", type=str, default=None,
                         help="Comma-separated OSM 'highway' types to include (e.g. 'motorway,primary,secondary').")
+    parser.add_argument("--seed", type=int, default=0, help="Deterministic seed for node ordering")
 
-    try:
-        args = parser.parse_args()
 
-        # 解析并归一化 CSV 路径
-        csv_path = os.path.expanduser(args.csv_path)
-        if not os.path.isabs(csv_path):
-            base_dir = os.path.abspath(os.path.expanduser(
-                os.environ.get("RESULT_BASE") or
-                os.path.join(os.path.dirname(os.path.abspath(__file__)), "result")
-            ))
-            os.makedirs(base_dir, exist_ok=True)
-            csv_path = os.path.join(base_dir, csv_path)
 
-        road_type_weights = load_weights(args.road_type_version, args.road_type_path)
-        lane_weight_config = load_lane_weights(args.lane_weight_version, args.lane_weight_path)
+    args = parser.parse_args()
 
-        process_place(
-            place=args.place,
-            road_type_weights=road_type_weights,
-            version=args.road_type_version,
-            k=args.k,
-            dist=int(args.dist),          # 确保传 int
-            cache_dir=args.cache_dir,
-            csv_path=csv_path,
-            lane_weight_config=lane_weight_config,
-            lane_weight_version=args.lane_weight_version,
-            alpha=args.alpha,
-            beta=args.beta,
-            gamma=args.gamma,
-            seed=args.seed,
-            road_types=args.road_types,
-            output_dir=args.output_dir,
-        )
-    except Exception as e:
-        # 打印完整堆栈到 stdout（GUI 已把 stderr 合并到 stdout）
-        traceback.print_exc()
-        sys.exit(1)
+    # Expand and resolve CSV path
+    csv_path = os.path.expanduser(args.csv_path)
+    if not os.path.isabs(csv_path):
+        base_dir = os.path.abspath(os.path.expanduser(
+            os.environ.get("RESULT_BASE") or
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "result")
+        ))
+        os.makedirs(base_dir, exist_ok=True)
+        csv_path = os.path.join(base_dir, csv_path)
+
+    road_type_weights = load_weights(args.road_type_version, args.road_type_path)
+    lane_weight_config = load_lane_weights(args.lane_weight_version, args.lane_weight_path)
+
+    process_place(
+        place=args.place,
+        road_type_weights=road_type_weights,
+        version=args.road_type_version,
+        k=args.k,
+        dist=args.dist,
+        cache_dir=args.cache_dir,
+        csv_path=csv_path,
+        lane_weight_config=lane_weight_config,
+        lane_weight_version=args.lane_weight_version,
+        alpha=args.alpha,
+        beta=args.beta,
+        gamma=args.gamma,
+        road_types=args.road_types,
+        output_dir=args.output_dir,
+
+    )

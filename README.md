@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # min_balanced_cut_road_networks_osm (branch: `version_with_CutRatio`)
 
 Graph partitioning for OpenStreetMap road networks using KaHIP/KaMinPar, with interactive GUIs (PyQt5 / Tkinter), Folium map rendering, and batch experiment tooling. This branch adds cut-ratio–aware pipelines and richer visualization.
@@ -235,3 +236,7 @@ Iterates over parameter_combinations_part1.json and appends to the daily CSV
 
 
 
+=======
+# graph_splitting_llm
+Add llm to the graph splitting software
+>>>>>>> d1213c09374b1ad7d656042d70d246e4faa987ab

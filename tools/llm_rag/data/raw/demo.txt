@@ -1,0 +1,1 @@
+KaHIP is a graph partitioning framework. Cut ratio = cut_edge_weight_sum / total_weight. Karlsruhe k=4 is a common demo.

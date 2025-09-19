@@ -2,18 +2,22 @@
 OSM Partition Viewer
 """
 
-import os
-import sys
-import json
+import os, sys, json, yaml
 from pathlib import Path
 
-from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget,
-    QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QSlider, QSpinBox, QTextEdit, QGroupBox, QFormLayout, QComboBox
-)
+#from PyQt5.QtWidgets import (
+#    QApplication, QMainWindow, QWidget,QtCore, QtWidgets,
+#    QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+#    QSlider, QSpinBox, QTextEdit, QGroupBox, QFormLayout, QComboBox
+#)
+#from PyQt5.QtCore import Qt, QUrl, pyqtSignal, QTimer, QThread
+#from PyQt5.QtWebEngineWidgets import QWebEngineView
+
+from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtCore import Qt, QUrl, pyqtSignal, QTimer, QThread
 from PyQt5.QtWebEngineWidgets import QWebEngineView
+from PyQt5.QtWidgets import QApplication
+
 
 # Project imports
 from core.osm_loader import load_graph
@@ -22,9 +26,127 @@ from core.results_reader import read_kahip_json, parse_from_json
 from gui.visualize import make_map, compute_cut_stats
 from core.config import OUTPUT_DIR
 
+from tools.llm_rag.rag.retriever import Retriever
+from tools.llm_rag.rag.generator import generate_answer
+
+
 # Fixed configuration file names 
 ROAD_TYPE_FILE = "road_type_weights.json"
 LANE_WEIGHT_FILE = "lane_weight_version.json"
+
+
+# ==== Q&A 线程与 Tab ====
+class QAWorker(QtCore.QThread):
+    resultReady = QtCore.pyqtSignal(dict)
+
+    def __init__(self, retriever: Retriever, question: str, rules: str, top_k: int):
+        super().__init__()
+        self.retriever = retriever
+        self.question = question
+        self.rules = rules
+        self.top_k = top_k
+
+    def run(self):
+        try:
+            hits = self.retriever.search(self.question, top_k=self.top_k)
+            # 统一 contexts 为纯文本列表
+            contexts = []
+            for h in hits:
+                if isinstance(h, dict):
+                    contexts.append(h.get("text", ""))
+                elif isinstance(h, (list, tuple)) and len(h) >= 1:
+                    contexts.append(h[0])
+                else:
+                    contexts.append(str(h))
+            answer = generate_answer(self.question, contexts)
+            res = {"question": self.question, "answer": answer, "hits": hits}
+        except Exception as e:
+            res = {"error": str(e)}
+        self.resultReady.emit(res)
+
+
+class QATab(QtWidgets.QWidget):
+    def __init__(self, parent=None, config_path="config.yaml"):
+        super().__init__(parent)
+
+        # 读配置（容错）
+        cfg = {}
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+        except Exception:
+            pass
+
+        top_k = int(cfg.get("retrieval", {}).get("top_k", 5))
+        rules_path = cfg.get("rules_path", "")
+        self.rules = ""
+        if rules_path and os.path.exists(rules_path):
+            with open(rules_path, "r", encoding="utf-8") as f:
+                self.rules = f.read()
+
+        # 初始化 RAG 检索器（按你的 Retriever 构造签名来）
+        self.retriever = Retriever(
+            vectors_path=cfg.get("index", {}).get("vectors", "tools/llm_rag/data/index/vectors.npy"),
+            texts_path=cfg.get("index", {}).get("texts",   "tools/llm_rag/data/index/texts.txt"),
+        )
+        self.top_k = top_k
+
+        # 界面
+        self.chat = QtWidgets.QTextEdit(self); self.chat.setReadOnly(True)
+        self.input = QtWidgets.QLineEdit(self)
+        self.sendBtn = QtWidgets.QPushButton("Send", self)
+        self.status = QtWidgets.QLabel("Ready", self)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(self.chat)
+        hl = QtWidgets.QHBoxLayout()
+        hl.addWidget(self.input); hl.addWidget(self.sendBtn)
+        layout.addLayout(hl)
+        layout.addWidget(self.status)
+
+        self.sendBtn.clicked.connect(self.on_send)
+        self.input.returnPressed.connect(self.on_send)
+        self._append_system("Q&A ready. Ask me anything!")
+
+    def _append_user(self, text): self.chat.append(f"<p><b>You:</b> {text}</p>")
+    def _append_assistant(self, text): self.chat.append(f"<p><b>Assistant:</b> {text}</p>")
+    def _append_system(self, text): self.chat.append(f"<p style='color:gray'><i>{text}</i></p>")
+
+    def on_send(self):
+        q = self.input.text().strip()
+        if not q: return
+        self._append_user(q)
+        self.input.clear()
+        self.status.setText("Thinking…")
+        self.sendBtn.setEnabled(False)
+
+        self.worker = QAWorker(self.retriever, q, self.rules, self.top_k)
+        self.worker.resultReady.connect(self.on_result)
+        self.worker.finished.connect(lambda: self.sendBtn.setEnabled(True))
+        self.worker.start()
+
+    def on_result(self, res: dict):
+        if "error" in res:
+            self._append_system("Error: " + res["error"])
+            self.status.setText("Error")
+            return
+        self._append_assistant(res["answer"])
+        # 展示命中片段（可选）
+        hits = res.get("hits", [])
+        if hits:
+            self.chat.append("<details><summary>Retrieved context</summary>")
+            for i, h in enumerate(hits, 1):
+                if isinstance(h, dict):
+                    txt = h.get("text", "")
+                    sc = h.get("score", None)
+                elif isinstance(h, (list, tuple)) and len(h) >= 1:
+                    txt, sc = h[0], (h[1] if len(h) > 1 else None)
+                else:
+                    txt, sc = str(h), None
+                score_str = f"(score={sc:.4f})" if isinstance(sc, (int, float)) else ""
+                self.chat.append(f"<p><b>#{i}</b> {score_str}<br>{txt[:500]}</p>")
+            self.chat.append("</details>")
+        self.status.setText("Ready")
 
 
 #  Pipeline Thread 
@@ -107,16 +229,29 @@ class PipelineThread(QThread):
 
 
 #  Main Window 
-class MainWindow(QMainWindow):
-    """
-    Main application window for the OSM Partition Viewer.
-    Provides controls for setting parameters, running KaHIP,
-    and displaying the resulting map and statistics.
-    """
+"""class MainWindow(QMainWindow):
+    
+    #Main application window for the OSM Partition Viewer.
+    #Provides controls for setting parameters, running KaHIP,
+    #and displaying the resulting map and statistics.
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("OSM Partition Viewer")
         self.resize(1200, 800)
+        # 1) 整体用 Tab 容器
+        self.tabs = QtWidgets.QTabWidget(self)
+        self.setCentralWidget(self.tabs)
+        #2) 原有 Partition Viewer 页面打包到一个 QWidget
+        viewer_page = QtWidgets.QWidget(self)
+        self._init_viewer_ui(viewer_page)  # 把你现有的大段 UI 初始化逻辑搬进这个函数
+        self.tabs.addTab(viewer_page, "Partition")
+
+        # 3) 新增 Q&A Tab
+        self.qa_tab = QATab(self, config_path="config.yaml")
+        self.tabs.addTab(self.qa_tab, "Q&A")
+
+
 
         # Store current alpha, beta, gamma values
         self.params = {"alpha": 1.00, "beta": 1.00, "gamma": 1.00}
@@ -162,10 +297,10 @@ class MainWindow(QMainWindow):
 
         # Alpha / beta / gamma sliders (0–5, represented as 0–500 for precision)
         def add_param_slider(caption: str, key: str, init_float: float = 1.00):
-            """
-            Build a row: [caption label] [slider] [value label].
-            Returns the slider and its value label.
-            """
+            
+            #Build a row: [caption label] [slider] [value label].
+            #Returns the slider and its value label.
+            
             box = QHBoxLayout(); left.addLayout(box)
             box.addWidget(QLabel(caption))
 
@@ -246,7 +381,144 @@ class MainWindow(QMainWindow):
         self._wire_param_changes()
 
         # Load version options at startup
+        self._load_version_lists(default_road="all_1", default_lane="v1") """
+class MainWindow(QtWidgets.QMainWindow):
+    """
+    Main application window for the OSM Partition Viewer.
+    Provides controls for setting parameters, running KaHIP,
+    and displaying the resulting map and statistics.
+    """
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("OSM Partition Viewer")
+        self.resize(1200, 800)
+
+        # ==== 参数与状态 ====
+        self.params = {"alpha": 1.00, "beta": 1.00, "gamma": 1.00}
+        self._scale = 100
+        self._map_cache = {}
+        self._running = False
+        self._has_ever_run = False
+        self._pending_manual = False
+        self._manual_dirty_style = "background:#ffe9a8;"
+
+        # debounce
+        self._debounce_auto = QTimer(self)
+        self._debounce_auto.setSingleShot(True)
+        self._debounce_auto.setInterval(200)
+        self._debounce_auto.timeout.connect(self.on_params_finalized)
+
+        # ==== 用 Tab 做中央控件 ====
+        self.tabs = QtWidgets.QTabWidget(self)
+        self.setCentralWidget(self.tabs)
+
+        # Partition 页面
+        viewer_page = QtWidgets.QWidget(self)
+        self._init_viewer_ui(viewer_page)  # ⬅️ 把原来的 Partition 界面塞进这个函数
+        self.tabs.addTab(viewer_page, "Partition")
+
+        # Q&A 页面
+        self.qa_tab = QATab(self, config_path="config.yaml")
+        self.tabs.addTab(self.qa_tab, "Q&A")
+
+    # =============== 把原来“Layout setup … _load_version_lists”那一大段搬到这里 ===============
+    def _init_viewer_ui(self, parent_widget: QtWidgets.QWidget):
+        """Build the Partition Viewer UI inside the given parent widget."""
+        root = QtWidgets.QHBoxLayout(parent_widget)
+
+        # Left column (controls and logs)
+        left = QtWidgets.QVBoxLayout()
+        root.addLayout(left, 0)
+
+        # Place / dist / k inputs
+        row1 = QtWidgets.QHBoxLayout(); left.addLayout(row1)
+        row1.addWidget(QtWidgets.QLabel("Place"))
+        self.edit_place = QtWidgets.QLineEdit("Karlsruhe, Germany"); row1.addWidget(self.edit_place, 1)
+
+        row2 = QtWidgets.QHBoxLayout(); left.addLayout(row2)
+        row2.addWidget(QtWidgets.QLabel("dist [m]"))
+        self.spin_dist = QtWidgets.QSpinBox(); self.spin_dist.setRange(100, 50000); self.spin_dist.setValue(5000)
+        row2.addWidget(self.spin_dist)
+        row2.addWidget(QtWidgets.QLabel("k"))
+        self.spin_k = QtWidgets.QSpinBox(); self.spin_k.setRange(2, 64); self.spin_k.setValue(4)
+        row2.addWidget(self.spin_k)
+
+        # Alpha / beta / gamma sliders (0–5)
+        def add_param_slider(caption: str, key: str, init_float: float = 1.00):
+            box = QtWidgets.QHBoxLayout(); left.addLayout(box)
+            box.addWidget(QtWidgets.QLabel(caption))
+
+            s = QtWidgets.QSlider(Qt.Orientation.Horizontal)
+            s.setRange(0, int(5.00 * self._scale))
+            s.setValue(int(init_float * self._scale))
+            s.setSingleStep(1)
+            s.setPageStep(10)
+            box.addWidget(s, 1)
+
+            val_label = QtWidgets.QLabel(f"{init_float:.2f}")
+            val_label.setMinimumWidth(48)
+            val_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            box.addWidget(val_label)
+
+            s.valueChanged.connect(lambda v: self._on_slider_change(v, key, val_label))
+            return s, val_label
+
+        self.sld_alpha, self.lbl_alpha_val = add_param_slider("alpha", "alpha", 1.00)
+        self.sld_beta,  self.lbl_beta_val  = add_param_slider("beta",  "beta",  1.00)
+        self.sld_gamma, self.lbl_gamma_val = add_param_slider("gamma", "gamma", 1.00)
+
+        # Version selectors (dropdown)
+        row3 = QtWidgets.QHBoxLayout(); left.addLayout(row3)
+        row3.addWidget(QtWidgets.QLabel("road_type_version"))
+        self.cmb_road_ver = QtWidgets.QComboBox(); row3.addWidget(self.cmb_road_ver, 1)
+
+        row3b = QtWidgets.QHBoxLayout(); left.addLayout(row3b)
+        row3b.addWidget(QtWidgets.QLabel("lane_weight_version"))
+        self.cmb_lane_ver = QtWidgets.QComboBox(); row3b.addWidget(self.cmb_lane_ver, 1)
+
+        # Run button
+        self.btn_run = QtWidgets.QPushButton("Run "); left.addWidget(self.btn_run)
+        self.btn_run.clicked.connect(self._on_run_clicked)
+
+        # Open output folder
+        self.btn_open = QtWidgets.QPushButton("Open output folder"); left.addWidget(self.btn_open)
+        self.btn_open.clicked.connect(lambda: self._open_dir(OUTPUT_DIR))
+
+        # Top summary
+        self.top_summary = QtWidgets.QLabel("—")
+        self.top_summary.setStyleSheet("color:#222; font-weight:600;")
+        left.addWidget(self.top_summary)
+
+        # Statistics box
+        self.stats_box = QtWidgets.QGroupBox("Partition Statistics")
+        stats_layout = QtWidgets.QFormLayout(self.stats_box)
+        self.lbl_edges = QtWidgets.QLabel("-")
+        self.lbl_cut_cnt = QtWidgets.QLabel("-")
+        self.lbl_total_w = QtWidgets.QLabel("-")
+        self.lbl_cut_w = QtWidgets.QLabel("-")
+        self.lbl_cut_ratio = QtWidgets.QLabel("-")
+        self.lbl_w_ratio = QtWidgets.QLabel("-")
+        stats_layout.addRow("Edges", self.lbl_edges)
+        stats_layout.addRow("Cut edges", self.lbl_cut_cnt)
+        stats_layout.addRow("Total weight", self.lbl_total_w)
+        stats_layout.addRow("Cut weight sum", self.lbl_cut_w)
+        stats_layout.addRow("Cut ratio", self.lbl_cut_ratio)
+        stats_layout.addRow("Weight ratio", self.lbl_w_ratio)
+        left.addWidget(self.stats_box)
+
+        # Run log
+        left.addWidget(QtWidgets.QLabel("Run Log / Metrics"))
+        self.txt = QtWidgets.QTextEdit(); self.txt.setReadOnly(True); left.addWidget(self.txt, 1)
+
+        # Right column (map display)
+        self.web = QWebEngineView(parent_widget)
+        root.addWidget(self.web, 1)
+
+        # 绑定参数变化
+        self._wire_param_changes()
+        # 初始加载版本列表
         self._load_version_lists(default_road="all_1", default_lane="v1")
+
 
     #  Load available versions from JSON 
     def _load_version_lists(self, default_road="all_1", default_lane="v1"):
@@ -307,7 +579,7 @@ class MainWindow(QMainWindow):
         self.cmb_road_ver.currentIndexChanged.connect(self._on_manual_param_changed)
         self.cmb_lane_ver.currentIndexChanged.connect(self._on_manual_param_changed)
 
-    def _on_slider_change(self, v: int, key: str, value_label: QLabel):
+    def _on_slider_change(self, v: int, key: str, value_label: QtWidgets.QLabel):
         """
         Live-update numeric label and store parameter when a slider moves.
         Also start/restart the debounce timer for potential auto-run.

@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+faiss-cpu
+chromadb
+sentence-transformers
+pypdf
+pandas
+numpy
+transformers

@@ -1,0 +1,7 @@
+# 最小配置
+index:
+  vectors: "tools/llm_rag/data/index/vectors.npy"
+  texts:   "tools/llm_rag/data/index/texts.txt"
+retrieval:
+  top_k: 5
+rules_path: "tools/llm_rag/general_rules.md"

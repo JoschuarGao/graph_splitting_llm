@@ -13,3 +13,10 @@ fiona>=1.9
 PyQt5>=5.15
 PyQt5-WebEngine>=5.15
 
+# llm
+pyqtwebengine
+faiss-cpu
+sentence-transformers
+pyyaml
+folium
+
